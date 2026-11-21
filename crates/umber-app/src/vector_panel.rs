@@ -31,6 +31,7 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "vector.stroke-color",
     "vector.stroke-cap",
     "vector.stroke-join",
+    "vector.stroke-miter-limit",
     "vector.stroke-dash",
     "vector.stroke-dash-offset",
     "vector.export-svg",
@@ -226,6 +227,19 @@ where
                             changed = true;
                         }
                     });
+                    if shows_miter_limit(stroke.join) {
+                        let mut limit = stroke.miter_limit;
+                        let field_changed = field_row(
+                            ui,
+                            &tr("vector.stroke-miter-limit"),
+                            umber_gui::ValueField::new(&mut limit)
+                                .context_menu(crate::i18n::prop_menu_labels())
+                                .range(1.0..=1000.0),
+                        );
+                        if field_changed && set_miter_limit(stroke, limit) {
+                            changed = true;
+                        }
+                    }
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(tr("vector.stroke-dash")).color(umber_gui::muted()),
@@ -447,6 +461,23 @@ fn set_stroke_enabled(shape: &mut VectorShape, enabled: bool) {
     }
 }
 
+/// The miter limit only shapes Miter joins; Round and Bevel keep the stored
+/// value for SVG roundtrips but hide the irrelevant row.
+fn shows_miter_limit(join: umber_core::vector::StrokeJoin) -> bool {
+    matches!(join, umber_core::vector::StrokeJoin::Miter)
+}
+
+/// The exact edit mediator the Miter-limit row drives. Returns false on a
+/// no-op so the panel does not mint a history entry for an unchanged value.
+fn set_miter_limit(stroke: &mut Stroke, value: f32) -> bool {
+    if stroke.miter_limit == value {
+        false
+    } else {
+        stroke.miter_limit = value;
+        true
+    }
+}
+
 fn parse_dash_pattern(
     text: &str,
     offset: f32,
@@ -518,6 +549,7 @@ mod row_label_tests {
                 "Stroke color",
                 "Stroke cap",
                 "Stroke join",
+                "Miter limit",
                 "Dash pattern",
                 "Dash offset",
                 "Export SVG",
@@ -577,6 +609,62 @@ mod tests {
         assert!(parse_dash_pattern("solid", 0.0).expect("solid").is_solid());
         assert!(parse_dash_pattern("0 0", 0.0).is_err());
         assert!(parse_dash_pattern("not-a-number", 0.0).is_err());
+    }
+
+    #[test]
+    fn miter_limit_row_visibility_matches_the_selected_join() {
+        use umber_core::vector::StrokeJoin::*;
+        assert!(shows_miter_limit(Miter));
+        assert!(!shows_miter_limit(Round));
+        assert!(!shows_miter_limit(Bevel));
+        let src = include_str!("vector_panel.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let guard = production
+            .find("shows_miter_limit(stroke.join)")
+            .expect("production row is guarded by the join helper");
+        let row = production[guard..]
+            .find("\"vector.stroke-miter-limit\"")
+            .expect("production row key")
+            + guard;
+        assert!(guard < row, "the row must sit behind the Miter-only guard");
+    }
+
+    #[test]
+    fn miter_limit_edit_is_one_undoable_set_vector_and_preserves_the_stroke() {
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("Path", LayerKind::Vector));
+        let base = doc.history.len();
+        let mut edited = doc.layers()[0].vector.clone().unwrap_or_default();
+        set_stroke_enabled(&mut edited.shape, true);
+        {
+            let stroke = edited.shape.stroke.as_mut().expect("stroke enabled");
+            stroke.join = umber_core::vector::StrokeJoin::Miter;
+            assert!(set_miter_limit(stroke, 8.0));
+            assert!(
+                !set_miter_limit(stroke, 8.0),
+                "no-op edit reports no change"
+            );
+        }
+        doc.run(LayerCommand::set_vector(0, edited));
+        assert_eq!(doc.history.len(), base + 1);
+        assert_eq!(
+            doc.layers()[0]
+                .vector
+                .as_ref()
+                .expect("created")
+                .shape
+                .stroke,
+            Some(Stroke {
+                miter_limit: 8.0,
+                width: DEFAULT_STROKE_WIDTH,
+                cap: umber_core::vector::StrokeCap::Round,
+                join: umber_core::vector::StrokeJoin::Miter,
+                dash: umber_core::vector::StrokeDash::solid(),
+                color: [0, 0, 0, 255],
+            })
+        );
+        assert!(doc.undo());
+        assert!(doc.layers()[0].vector.is_none());
     }
 
     #[test]

@@ -964,6 +964,7 @@ vector =
     .stroke-join-miter = Miter
     .stroke-join-round = Redonda
     .stroke-join-bevel = Chanfro
+    .stroke-miter-limit = Limite de miter
     .stroke-dash = Padrão de tracejado
     .stroke-dash-offset = Deslocamento do tracejado
     .export-svg = Exportar SVG

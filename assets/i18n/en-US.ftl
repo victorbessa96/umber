@@ -945,6 +945,7 @@ vector =
     .stroke-join-miter = Miter
     .stroke-join-round = Round
     .stroke-join-bevel = Bevel
+    .stroke-miter-limit = Miter limit
     .stroke-dash = Dash pattern
     .stroke-dash-offset = Dash offset
     .export-svg = Export SVG

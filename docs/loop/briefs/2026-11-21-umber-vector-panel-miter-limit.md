@@ -27,10 +27,11 @@ K8c exposes the already-stored value as an editable panel row:
   while `stroke.join == StrokeJoin::Miter`; Round/Bevel hide it because the
   value has no join geometry effect there, while the stored value and SVG export
   still roundtrip unchanged.
-- Range the field `1.0..=1000.0`, matching the domain accepted by the core
-  builder and avoiding non-finite or sub-1 UI input. Any field change rides the
-  existing `LayerCommand::set_vector(id, edited)` path, so one edit is one
-  undoable history entry.
+- Range the field `1.0..=1000.0` as a deliberate UI cap inside the core domain
+  (finite `>= 1`; the core builder has no upper bound), avoiding non-finite or
+  sub-1 UI input. Any field change rides the existing
+  `LayerCommand::set_vector(id, edited)` path, so one edit is one undoable
+  history entry.
 - Add the key to `ROW_LABEL_KEYS` in draw order and update the panel label test's
   expected English list.
 - Add focused tests for the Miter-only visibility behavior and for an edit
