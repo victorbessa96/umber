@@ -20,20 +20,30 @@ partner."
 
 ---
 
-## Current vector wave (2026-11-20)
+## Current vector wave (2026-11-21)
 
-K8a compound fill and one-layer-per-path subpath import is landed at
+K8b SVG stroke miter limits is landed at `22bdd3e4`, with brief `069fbdb5`.
+`Stroke.miter_limit` defaults to 4, participates in cache identity, omits the
+default from JSON, and validates finite values >=1 at the shared builder. Miter
+geometry now uses SVG's normative interior-angle ratio, a documented inclusive
+floating-point bound, normalized supporting directions, and finite-result
+guards. Root/group/path inheritance and native roundtrips preserve non-default
+limits while invalid values fail closed, including when masked by descendants.
+Core 338/338 and the complete app battery are green; three independent review
+rounds closed with SHIP / APPROVE. Report:
+`docs/loop/kill-reports/2026-11-21-umber-vector-miter-limit.md`.
+
+K8a compound fill and one-layer-per-path subpath import remains landed at
 `6f35557f`, on K7f arcs/curved shapes `2555d2d8`, K7e straight-line shapes
 `64dad2b1`, K7d transforms `65957542`, K7c group paint inheritance `f04ed236`,
 K7b subpath import `3d087302`, K7a multi-path import `29a02f9a`, K6d dash
 patterns `58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`,
-and K6a even-odd fill `7372aa53`.
-Primary and secondary contours now share one deterministic fill rule, paint,
-stroke, cache key, and grouped undo history. Nonzero/evenodd holes, primary-empty
-rendering, per-contour closure/dash state, aggregate geometry budgets, compound
-SVG byte stability, and secondary-safe cache invalidation are pinned. Next:
-further scoped SVG hardening or a separately designed secondary-contour editing
-wave; release work remains gated.
+and K6a even-odd fill `7372aa53`. Primary and secondary contours share one
+deterministic fill rule, paint, stroke, cache key, and grouped undo history;
+nonzero/evenodd holes, primary-empty rendering, per-contour closure/dash state,
+aggregate geometry budgets, compound SVG byte stability, and secondary-safe
+cache invalidation remain pinned. Next: further scoped SVG hardening or a
+separately designed secondary-contour editing wave; release work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 
