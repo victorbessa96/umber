@@ -22,6 +22,16 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8f leaf non-scaling-stroke import is landed at `9071c3df`, with brief
+`7718320e`. SVG 2 host-viewport units drive width, dash lengths, and offset
+only when selected; ordinary effective-CTM scaling is unchanged. Local
+non-inherited plumbing and validation before the no-stroke return cover hidden
+and unstroked leaves. Root/group forms and other vector-effect values remain
+refused. Export does not preserve the source flag. Core is 348/348 and the full
+app battery is green (321 lib + 892 bin + every integration/doc suite).
+Independent `deleg_c0427ff2` returned APPROVED. Report:
+`docs/loop/kill-reports/2026-11-21-umber-vector-non-scaling-stroke.md`.
+
 K8e raster display/visibility semantics are landed at `c2831099`, with brief
 `661f6f14`. Raster Style now carries effective display and visibility; hidden
 shapes bypass geometry and MAX_SHAPES while transforms still validate. Display
