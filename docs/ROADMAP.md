@@ -22,6 +22,16 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8g non-scaling-stroke preservation is landed at `1f49a533`, with brief
+`4371f5b8`. `Stroke.non_scaling_stroke` now survives native JSON with
+false-default omission, participates in cache identity, imports from K8f, and
+exports conditionally as SVG 2 `vector-effect`. Canonical export→import→export
+is byte-stable. Every existing Stroke literal defaults false; app UI behavior
+and raster are unchanged. Core is 349/349 and the full app battery is green
+(321 lib + 892 bin + every integration/doc suite). R1/R2 documentation findings
+were fixed and R3 `deleg_ad7fa1ee` returned APPROVED. Report:
+`docs/loop/kill-reports/2026-11-21-umber-vector-non-scaling-stroke-preservation.md`.
+
 K8f leaf non-scaling-stroke import is landed at `9071c3df`, with brief
 `7718320e`. SVG 2 host-viewport units drive width, dash lengths, and offset
 only when selected; ordinary effective-CTM scaling is unchanged. Local
