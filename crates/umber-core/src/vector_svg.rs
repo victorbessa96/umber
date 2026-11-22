@@ -1445,19 +1445,116 @@ mod tests {
     }
 
     #[test]
+    fn inline_style_overrides_presentation_and_inherits() {
+        let svg = br##"<svg width="100" height="100" style="fill:#112233; fill-opacity:0.5; fill-rule:evenodd; stroke:#445566; stroke-opacity:0.25; stroke-width:2" fill="#000000" stroke="#000000"><g style="fill:none; stroke-linecap:square" fill="#ff0000"><path style="fill:#aabbcc; stroke-linejoin:miter; stroke-miterlimit:6; stroke-dasharray:2 3; stroke-dashoffset:1; vector-effect:non-scaling-stroke; visibility:visible" fill="#000000" stroke-dasharray="9 9" transform="scale(2)" d="M0 0 L1 1 L0 1 Z"/><path d="M1 0 L1 1"/></g><path d="M0 0 L0 1"/><path style="display:none" d="M0 0 L1 0"/><path style="visibility:hidden" d="M1 0 L1 1"/><path style="display:none!important" d="M0 1 L1 0"/></svg>"##;
+        let shapes = import_svg_many(svg).expect("inline styles");
+        assert_eq!(shapes.len(), 3);
+        let styled = &shapes[0].shape;
+        assert_eq!(styled.fill, [170, 187, 204, 128]);
+        assert_eq!(styled.fill_rule, crate::svg::FillRule::EvenOdd);
+        let stroke = styled.stroke.expect("styled stroke");
+        assert_eq!(stroke.color, [68, 85, 102, 64]);
+        assert!((stroke.width - 0.02).abs() < 1.0e-6);
+        assert_eq!(stroke.cap, crate::vector::StrokeCap::Square);
+        assert_eq!(stroke.join, crate::vector::StrokeJoin::Miter);
+        assert_eq!(stroke.miter_limit, 6.0);
+        assert_eq!(stroke.dash.lengths(), &[0.02, 0.03]);
+        assert!((stroke.dash.offset - 0.01).abs() < 1.0e-6);
+        assert!(stroke.non_scaling_stroke);
+
+        let group_inherited = &shapes[1].shape;
+        assert_eq!(group_inherited.fill, [0, 0, 0, 0]);
+        assert_eq!(group_inherited.fill_rule, crate::svg::FillRule::EvenOdd);
+        let group_stroke = group_inherited.stroke.expect("group stroke");
+        assert_eq!(group_stroke.color, [68, 85, 102, 64]);
+        assert_eq!(group_stroke.cap, crate::vector::StrokeCap::Square);
+
+        let inherited = &shapes[2].shape;
+        assert_eq!(inherited.fill, [17, 34, 51, 128]);
+        assert_eq!(inherited.fill_rule, crate::svg::FillRule::EvenOdd);
+        let inherited_stroke = inherited.stroke.expect("inherited stroke");
+        assert_eq!(inherited_stroke.color, [68, 85, 102, 64]);
+        assert!((inherited_stroke.width - 0.02).abs() < 1.0e-6);
+        assert!(!inherited_stroke.non_scaling_stroke);
+
+        let exported = export_svg(styled).expect("canonical export");
+        assert!(!exported.contains("style="));
+        assert!(exported.contains("fill=\"#AABBCC\""));
+        assert!(exported.contains(" vector-effect=\"non-scaling-stroke\""));
+    }
+
+    #[test]
+    fn inline_style_last_wins_important_case_and_invalid_values() {
+        let svg = br##"<svg width="100" height="100"><path style="fill:#111111; FILL:#222222!ImPoRtAnT; FILL-OPACITY:0.25; stroke:#000000" d="M0 0 L1 1"/><path style="" d="M0 0 L0 1"/><path style="fill:#333333 !ImPoRtAnT" d="M1 0 L1 1"/><path style=";;;" d="M0 1 L1 0"/><path style="fill:#111111!important; FILL:#222222" d="M0 0 L1 1"/></svg>"##;
+        let shapes = import_svg_many(svg).expect("last-wins and empty styles");
+        assert_eq!(shapes.len(), 5);
+        assert_eq!(shapes[0].shape.fill, [34, 34, 34, 64]);
+        assert_eq!(shapes[1].shape.fill, [0, 0, 0, 255]);
+        assert_eq!(shapes[2].shape.fill, [51, 51, 51, 255]);
+        assert_eq!(shapes[3].shape.fill, [0, 0, 0, 255]);
+        assert_eq!(shapes[4].shape.fill, [34, 34, 34, 255]);
+
+        for (source, needle) in [
+            (
+                r#"<svg width="1" height="1" style="vector-effect:non-scaling-stroke"><path d="M0 0"/></svg>"#,
+                "root vector-effect",
+            ),
+            (
+                r#"<svg width="1" height="1"><g style="vector-effect:non-scaling-stroke"><path d="M0 0"/></g></svg>"#,
+                "group vector-effect",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style="opacity:0.5" d="M0 0"/></svg>"#,
+                "path style opacity",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style="transform:scale(2)" d="M0 0"/></svg>"#,
+                "path style transform",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style="fill" d="M0 0"/></svg>"#,
+                "path style declaration",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style=":red" d="M0 0"/></svg>"#,
+                "path style declaration",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style="fill:" d="M0 0"/></svg>"#,
+                "path style declaration",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style="fill:var(--x)" d="M0 0"/></svg>"#,
+                "fill",
+            ),
+            (
+                r#"<svg width="1" height="1"><path style="visibility:hidden; opacity:0.5" d="M0 0"/><path d="M0 0 L1 1"/></svg>"#,
+                "path style opacity",
+            ),
+        ] {
+            match import_svg_many(source.as_bytes()) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains(needle), "{what} lacks {needle}")
+                }
+                other => panic!("invalid inline style was accepted: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn root_group_and_path_presentation_effects_are_typed_refusals() {
         let cases: &[(&[u8], &str)] = &[
             (
-                br#"<svg width="1" height="1" style="fill:none"><path d="M0 0"/></svg>"#,
-                "root style",
+                br#"<svg width="1" height="1" style="opacity:0.5"><path d="M0 0"/></svg>"#,
+                "root style opacity",
             ),
             (
                 br#"<svg width="1" height="1" opacity="0.5"><path d="M0 0"/></svg>"#,
                 "root opacity",
             ),
             (
-                br#"<svg width="1" height="1"><g style="fill:none"><path d="M0 0"/></g></svg>"#,
-                "group style",
+                br#"<svg width="1" height="1"><g style="opacity:0.5"><path d="M0 0"/></g></svg>"#,
+                "group style opacity",
             ),
             (
                 br#"<svg width="1" height="1"><g opacity="0.5"><path d="M0 0"/></g></svg>"#,
@@ -1472,8 +1569,8 @@ mod tests {
                 "path opacity",
             ),
             (
-                br#"<svg width="1" height="1"><path style="fill:none" d="M0 0"/></svg>"#,
-                "path style",
+                br#"<svg width="1" height="1"><path style="opacity:0.5" d="M0 0"/></svg>"#,
+                "path style opacity",
             ),
             (
                 br#"<svg width="1" height="1"><path clip-path="url(#c)" d="M0 0"/></svg>"#,

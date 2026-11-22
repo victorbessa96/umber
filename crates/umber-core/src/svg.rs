@@ -1356,8 +1356,10 @@ impl PathSink for PolyBuilder {
 /// This walker deliberately sees only path commands, never presentation
 /// attributes. Element/root transforms are composed by the caller: the raster
 /// `PolyBuilder` owns its CTM, and vector import owns the effective root,
-/// group, and path CTM-to-UV map. CSS `style` remains refused; transforms are
-/// composed by the caller before this walker is called.
+/// group, and path CTM-to-UV map. Vector-import callers expand supported CSS
+/// `style` declarations and refuse unsupported ones before this walker is
+/// called; raster style handling is unchanged. Transforms are composed by the
+/// caller as well.
 fn build_path<S: PathSink>(d: &Attr, b: &mut S) -> Result<(), SvgError> {
     let mut cur = Cursor::new(d);
     let mut command: Option<u8> = None;
@@ -1912,6 +1914,7 @@ pub(crate) fn import_vector_svg_many(
         }
         Event::End | Event::Eof => return Err(parse_err(base, "no <svg> root element")),
     };
+    let root_attrs = expand_inline_style(&root_attrs, "root")?;
     let (width, height, root_ctm) = root_geometry(&root_attrs)?;
     if width == 0 || height == 0 {
         return Err(SvgError::ZeroSize { width, height });
@@ -1923,8 +1926,8 @@ pub(crate) fn import_vector_svg_many(
             max_pixels: crate::vector::MAX_VECTOR_RASTER_PIXELS,
         });
     }
-    // Root transform and inheritable paint are supported; root CSS, opacity,
-    // and effects must be refused rather than discarded.
+    // Root transform and inheritable paint are supported; unsupported CSS
+    // properties, opacity, and effects must be refused rather than discarded.
     refuse_root_import_presentation(&root_attrs)?;
     let root_display = vector_display_renders(&root_attrs);
     let root_visibility = vector_visibility_renders(&root_attrs, true, "root")?;
@@ -1976,6 +1979,7 @@ pub(crate) fn import_vector_svg_many(
                 let mut frame = None;
                 if let Some(parent) = parent {
                     if is_shape(&name) {
+                        let attrs = expand_inline_style(&attrs, &name)?;
                         let display = vector_display_renders(&attrs);
                         let visible = vector_visibility_renders(&attrs, parent.visible, &name)?;
                         let render = parent.display && display && visible;
@@ -1983,11 +1987,6 @@ pub(crate) fn import_vector_svg_many(
                             return Err(SvgError::TooComplex {
                                 what: "vector paths",
                                 limit: crate::vector::MAX_VECTOR_SHAPES,
-                            });
-                        }
-                        if find_attr(&attrs, "style").is_some() {
-                            return Err(SvgError::Unsupported {
-                                what: format!("{name} style in vector import"),
                             });
                         }
                         // Refuse unsupported effects before spending geometry
@@ -2049,6 +2048,7 @@ pub(crate) fn import_vector_svg_many(
                             }
                         }
                     } else if name == "g" {
+                        let attrs = expand_inline_style(&attrs, "group")?;
                         refuse_group_import_effects(&attrs)?;
                         let display = vector_display_renders(&attrs);
                         let visible = vector_visibility_renders(&attrs, parent.visible, "group")?;
@@ -2110,9 +2110,83 @@ fn validate_miter_limit_attr(attrs: &[Attr], element: &str) -> Result<(), SvgErr
     }
 }
 
+const VECTOR_INLINE_STYLE_ATTRS: [&str; 14] = [
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-opacity",
+    "stroke-width",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "display",
+    "visibility",
+    "vector-effect",
+];
+
+/// Expands the bounded inline-style subset into presentation attributes.
+/// Inline declarations override presentation attributes and later declarations
+/// override earlier ones. The original style text is never exported.
+fn expand_inline_style(attrs: &[Attr], element: &str) -> Result<Vec<Attr>, SvgError> {
+    let Some(style) = find_attr(attrs, "style") else {
+        return Ok(attrs.to_vec());
+    };
+    let mut expanded: Vec<Attr> = attrs
+        .iter()
+        .filter(|attr| attr.name != "style")
+        .cloned()
+        .collect();
+    for declaration in style.value.split(';') {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = declaration.split_once(':') else {
+            return Err(SvgError::Unsupported {
+                what: format!("{element} style declaration in vector import"),
+            });
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let mut value = value.trim();
+        const IMPORTANT: &str = "!important";
+        let suffix_start = value.len().saturating_sub(IMPORTANT.len());
+        if value.len() >= IMPORTANT.len()
+            && value.is_char_boundary(suffix_start)
+            && value[suffix_start..].eq_ignore_ascii_case(IMPORTANT)
+        {
+            value = value[..suffix_start].trim_end();
+        }
+        let tokens: Vec<&str> = value.split_whitespace().collect();
+        if name.is_empty() || tokens.is_empty() {
+            return Err(SvgError::Unsupported {
+                what: format!("{element} style declaration in vector import"),
+            });
+        }
+        if !VECTOR_INLINE_STYLE_ATTRS.contains(&name.as_str()) {
+            return Err(SvgError::Unsupported {
+                what: format!("{element} style {name} in vector import"),
+            });
+        }
+        let attr = Attr {
+            name: name.clone(),
+            value: tokens.join(" "),
+            value_offset: style.value_offset,
+        };
+        if let Some(existing) = expanded.iter_mut().find(|existing| existing.name == name) {
+            *existing = attr;
+        } else {
+            expanded.push(attr);
+        }
+    }
+    Ok(expanded)
+}
+
 fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
     // Transform and inheritable paint are meaningful to the import subset.
-    // Group opacity/effects/CSS would be dropped instead of inherited.
+    // Unsupported CSS properties and effects would be dropped instead of inherited.
     for key in [
         "clip-path",
         "mask",
