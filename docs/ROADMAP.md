@@ -22,6 +22,17 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8h bounded inline SVG style declarations are landed at `6e2e5b40`, with brief
+`3d86ad23`. Fourteen existing paint/display/visibility/vector-effect properties
+support inline declarations with inline-over-presentation precedence,
+last-wins, compact or spaced `!important`, typed unknown/invalid failures, and
+canonical presentation-attribute export. Root/group vector-effect remains
+refused; hidden leaves validate; raster/model/app are unchanged. Core is
+351/351 and the full app battery is green (321 lib + 892 bin + every
+integration/doc suite). R1 compact-important, R2 precedence coverage, and R3
+comment findings were fixed; R4 `deleg_c14a1b14` returned APPROVED. Report:
+`docs/loop/kill-reports/2026-11-22-umber-vector-inline-style.md`.
+
 K8g non-scaling-stroke preservation is landed at `1f49a533`, with brief
 `4371f5b8`. `Stroke.non_scaling_stroke` now survives native JSON with
 false-default omission, participates in cache identity, imports from K8f, and
