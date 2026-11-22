@@ -2001,7 +2001,7 @@ pub(crate) fn import_vector_svg_many(
                             // Hidden leaves still validate inherited paint and
                             // transforms. Visible zero-geometry shapes retain
                             // the old behavior of skipping paint parsing.
-                            let effective_attrs = inherited_vector_paint(&parent.paint, &attrs);
+                            let effective_attrs = effective_vector_paint(&parent.paint, &attrs);
                             parse_vector_paint(
                                 &effective_attrs,
                                 ctm,
@@ -2021,7 +2021,7 @@ pub(crate) fn import_vector_svg_many(
                                         limit: crate::vector::MAX_VECTOR_SHAPES,
                                     });
                                 }
-                                let effective_attrs = inherited_vector_paint(&parent.paint, &attrs);
+                                let effective_attrs = effective_vector_paint(&parent.paint, &attrs);
                                 let (fill, stroke, fill_rule) = parse_vector_paint(
                                     &effective_attrs,
                                     ctm,
@@ -2198,6 +2198,23 @@ fn inherited_vector_paint(parent: &[Attr], attrs: &[Attr]) -> Vec<Attr> {
     effective
 }
 
+/// Inherited paint plus the current graphics element's non-inherited effects.
+/// Group/root vector-effect remains refused, so this cannot inherit the flag.
+fn effective_vector_paint(parent: &[Attr], attrs: &[Attr]) -> Vec<Attr> {
+    let mut effective = inherited_vector_paint(parent, attrs);
+    if let Some(effect) = find_attr(attrs, "vector-effect") {
+        if let Some(existing) = effective
+            .iter_mut()
+            .find(|existing| existing.name == "vector-effect")
+        {
+            *existing = effect.clone();
+        } else {
+            effective.push(effect.clone());
+        }
+    }
+    effective
+}
+
 fn refuse_shape_import_effects(attrs: &[Attr], element: &str) -> Result<(), SvgError> {
     for key in [
         "opacity",
@@ -2207,7 +2224,6 @@ fn refuse_shape_import_effects(attrs: &[Attr], element: &str) -> Result<(), SvgE
         "marker-start",
         "marker-mid",
         "marker-end",
-        "vector-effect",
         "paint-order",
     ] {
         if find_attr(attrs, key).is_some() {
@@ -2226,6 +2242,18 @@ fn parse_vector_paint(
     height: u32,
     inherited_rule: FillRule,
 ) -> Result<([u8; 4], Option<crate::vector::Stroke>, FillRule), SvgError> {
+    let non_scaling_stroke = match find_attr(attrs, "vector-effect") {
+        None => false,
+        Some(attr) => match attr.value.trim() {
+            "" | "inherit" | "none" => false,
+            "non-scaling-stroke" => true,
+            other => {
+                return Err(SvgError::Unsupported {
+                    what: format!("path vector-effect {other} in vector import"),
+                })
+            }
+        },
+    };
     let fill_rule = match find_attr(attrs, "fill-rule") {
         None => inherited_rule,
         Some(rule) => match rule.value.trim() {
@@ -2299,7 +2327,12 @@ fn parse_vector_paint(
             what: "negative or non-finite stroke width".to_owned(),
         });
     }
-    let scale = ctm.max_scale() / f64::from(width.min(height));
+    let viewport_scale = 1.0 / f64::from(width.min(height));
+    let scale = if non_scaling_stroke {
+        viewport_scale
+    } else {
+        ctm.max_scale() * viewport_scale
+    };
     let dash = match find_attr(attrs, "stroke-dasharray") {
         None => crate::vector::StrokeDash::solid(),
         Some(attr) if attr.value.trim() == "none" => crate::vector::StrokeDash::solid(),

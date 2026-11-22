@@ -1358,6 +1358,65 @@ mod tests {
     }
 
     #[test]
+    fn non_scaling_stroke_uses_host_viewport_units() {
+        let svg = br##"<svg width="200" height="100" viewBox="0 0 10 10"><g transform="scale(4 1)"><path vector-effect="non-scaling-stroke" transform="scale(2)" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="1 2" stroke-dashoffset="0.5" d="M0 0 L1 1"/><path transform="scale(2)" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="1 2" stroke-dashoffset="0.5" d="M0 0 L1 1"/></g></svg>"##;
+        let shapes = import_svg_many(svg).expect("non-scaling and ordinary strokes");
+        assert_eq!(shapes.len(), 2);
+        let fixed = shapes[0].shape.stroke.expect("non-scaling stroke");
+        assert!((fixed.width - 0.02).abs() < 1.0e-6, "{}", fixed.width);
+        assert_eq!(fixed.dash.lengths(), &[0.01, 0.02]);
+        assert!((fixed.dash.offset - 0.005).abs() < 1.0e-6);
+        let ordinary = shapes[1].shape.stroke.expect("ordinary stroke");
+        assert!((ordinary.width - 3.2).abs() < 1.0e-6, "{}", ordinary.width);
+        assert_eq!(ordinary.dash.lengths(), &[1.6, 3.2]);
+        assert!((ordinary.dash.offset - 0.8).abs() < 1.0e-6);
+        assert!(!export_svg(&shapes[0].shape)
+            .expect("export")
+            .contains("vector-effect"));
+    }
+
+    #[test]
+    fn non_scaling_stroke_scope_values_and_shear_are_pinned() {
+        let svg = br##"<svg width="100" height="100"><g transform="matrix(1 0 1 1 0 0)"><path vector-effect="non-scaling-stroke" fill="none" stroke="#000000" stroke-width="2" d="M0 0 L1 1"/></g></svg>"##;
+        let shape = import_svg(svg).expect("shear host units");
+        assert!((shape.shape.stroke.expect("stroke").width - 0.02).abs() < 1.0e-6);
+
+        for value in ["none", "", "inherit"] {
+            let source = format!(
+                r##"<svg width="100" height="100"><path vector-effect="{value}" transform="scale(2)" fill="none" stroke="#000000" stroke-width="2" d="M0 0 L1 1"/></svg>"##
+            );
+            let shape = import_svg(source.as_bytes()).expect("ordinary vector-effect");
+            assert!((shape.shape.stroke.expect("stroke").width - 0.04).abs() < 1.0e-6);
+        }
+
+        for (source, needle) in [
+            (
+                r#"<svg width="1" height="1" vector-effect="non-scaling-stroke"><path d="M0 0"/></svg>"#,
+                "root vector-effect",
+            ),
+            (
+                r#"<svg width="1" height="1"><g vector-effect="non-scaling-stroke"><path d="M0 0"/></g></svg>"#,
+                "group vector-effect",
+            ),
+            (
+                r#"<svg width="1" height="1"><path vector-effect="non-scaling-size" d="M0 0"/></svg>"#,
+                "path vector-effect",
+            ),
+            (
+                r#"<svg width="1" height="1"><path visibility="hidden" vector-effect="non-scaling-size" d="M0 0"/><path d="M0 0 L1 1"/></svg>"#,
+                "path vector-effect",
+            ),
+        ] {
+            match import_svg_many(source.as_bytes()) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains(needle), "{what} lacks {needle}")
+                }
+                other => panic!("invalid vector-effect was accepted: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn root_group_and_path_presentation_effects_are_typed_refusals() {
         let cases: &[(&[u8], &str)] = &[
             (
@@ -1405,7 +1464,7 @@ mod tests {
                 "path marker-end",
             ),
             (
-                br#"<svg width="1" height="1"><path vector-effect="non-scaling-stroke" d="M0 0"/></svg>"#,
+                br#"<svg width="1" height="1"><path vector-effect="non-scaling-size" d="M0 0"/></svg>"#,
                 "path vector-effect",
             ),
             (
