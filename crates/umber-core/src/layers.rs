@@ -2419,6 +2419,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.125,
                     cap: crate::vector::StrokeCap::Round,
 

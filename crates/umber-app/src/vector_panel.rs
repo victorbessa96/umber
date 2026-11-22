@@ -448,6 +448,7 @@ fn set_stroke_enabled(shape: &mut VectorShape, enabled: bool) {
         (true, None) => {
             shape.stroke = Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: DEFAULT_STROKE_WIDTH,
                 cap: umber_core::vector::StrokeCap::Round,
 
@@ -656,6 +657,7 @@ mod tests {
                 .stroke,
             Some(Stroke {
                 miter_limit: 8.0,
+                non_scaling_stroke: false,
                 width: DEFAULT_STROKE_WIDTH,
                 cap: umber_core::vector::StrokeCap::Round,
                 join: umber_core::vector::StrokeJoin::Miter,
@@ -697,6 +699,7 @@ mod tests {
                 .stroke,
             Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: DEFAULT_STROKE_WIDTH,
                 cap: umber_core::vector::StrokeCap::Round,
 

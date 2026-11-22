@@ -21,9 +21,11 @@ pub enum VectorSvgError {
     InvalidMiterLimit,
 }
 
-/// Serializes one vector shape as a deterministic SVG 1.1 document. Open
+/// Serializes one vector shape as deterministic SVG output, using SVG 1.1
+/// geometry and paint plus the optional SVG 2 non-scaling-stroke effect. Open
 /// paths never fill; closed paths use the shape's nonzero or even-odd fill
-/// rule. Painted strokes carry the configured cap and K2's round join.
+/// rule. Painted strokes carry the configured cap, join, miter limit, and dash
+/// pattern.
 pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     if shape.total_anchors() > MAX_VECTOR_ANCHORS {
         return Err(VectorSvgError::TooComplex {
@@ -129,6 +131,9 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
             out.push_str(" stroke-miterlimit=\"");
             out.push_str(&number(stroke.miter_limit));
             out.push('"');
+        }
+        if stroke.non_scaling_stroke {
+            out.push_str(" vector-effect=\"non-scaling-stroke\"");
         }
         if !stroke.dash.is_solid() {
             out.push_str(" stroke-dasharray=\"");
@@ -260,6 +265,7 @@ mod tests {
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -311,6 +317,7 @@ mod tests {
             fill: [255, 255, 255, 255],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -330,6 +337,7 @@ mod tests {
         for stroke in [
             Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.0,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -339,6 +347,7 @@ mod tests {
             },
             Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: f32::NAN,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -348,6 +357,7 @@ mod tests {
             },
             Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -426,6 +436,7 @@ mod tests {
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.1,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -458,6 +469,7 @@ mod tests {
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -482,6 +494,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.02,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -514,6 +527,7 @@ mod tests {
             fill: [1, 2, 3, 255],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.125,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -559,6 +573,7 @@ mod tests {
             fill: [1, 2, 3, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -699,6 +714,7 @@ mod tests {
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.25,
                     color: [10, 20, 30, 255],
                     cap,
@@ -734,6 +750,7 @@ mod tests {
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.25,
                     color: [10, 20, 30, 255],
                     cap: crate::vector::StrokeCap::Butt,
@@ -766,6 +783,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: crate::vector::StrokeCap::Butt,
@@ -1370,9 +1388,19 @@ mod tests {
         assert!((ordinary.width - 3.2).abs() < 1.0e-6, "{}", ordinary.width);
         assert_eq!(ordinary.dash.lengths(), &[1.6, 3.2]);
         assert!((ordinary.dash.offset - 0.8).abs() < 1.0e-6);
-        assert!(!export_svg(&shapes[0].shape)
-            .expect("export")
+        assert!(fixed.non_scaling_stroke);
+        assert!(!ordinary.non_scaling_stroke);
+        let exported = export_svg(&shapes[0].shape).expect("export");
+        assert!(exported.contains(" vector-effect=\"non-scaling-stroke\""));
+        assert!(!export_svg(&shapes[1].shape)
+            .expect("ordinary export")
             .contains("vector-effect"));
+        let reparsed = import_svg(exported.as_bytes()).expect("reimport");
+        assert!(reparsed.shape.stroke.expect("stroke").non_scaling_stroke);
+        assert_eq!(
+            export_svg(&reparsed.shape).expect("canonical re-export"),
+            exported
+        );
     }
 
     #[test]
@@ -1841,6 +1869,7 @@ mod tests {
                 join: crate::vector::StrokeJoin::Miter,
                 dash: crate::vector::StrokeDash::solid(),
                 miter_limit,
+                non_scaling_stroke: false,
             }),
             anchors: vec![
                 crate::vector::Anchor::corner([0.25, 0.5]),
@@ -1896,6 +1925,7 @@ mod tests {
                     join: crate::vector::StrokeJoin::Miter,
                     dash: crate::vector::StrokeDash::solid(),
                     miter_limit: invalid,
+                    non_scaling_stroke: false,
                 }),
                 anchors: vec![
                     crate::vector::Anchor::corner([0.25, 0.5]),

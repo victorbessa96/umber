@@ -2378,6 +2378,7 @@ fn parse_vector_paint(
             join,
             dash,
             miter_limit,
+            non_scaling_stroke,
         }),
         fill_rule,
     ))

@@ -13,9 +13,11 @@ K8f's report names that one-way limitation.
 
 `Stroke` in `crates/umber-core/src/vector.rs` already has additive false/default
 precedents for cap, join, dash, and miter limit. `stroke_cache_eq` compares each
-field. Native JSON uses Serde defaults for backward compatibility. Only core
-files contain `Stroke` literals: `vector.rs`, `vector_svg.rs`, `svg.rs`, and one
-`layers.rs` test. No app constructor needs changing.
+field. Native JSON uses Serde defaults for backward compatibility. The core
+`Stroke` literal inventory is `vector.rs`, `vector_svg.rs`, `svg.rs`, one
+`layers.rs` test, and one `project.rs` test. Three `vector_panel.rs`
+production/test constructors also require mechanical `false` defaults but no app
+behavior change.
 
 ## Target
 
@@ -42,9 +44,10 @@ K8g preserves non-scaling-stroke in the editable model and SVG export:
 
 Locked files planned: `crates/umber-core/src/vector.rs`,
 `crates/umber-core/src/svg.rs`, `crates/umber-core/src/vector_svg.rs`,
-`crates/umber-core/src/layers.rs`, this brief, the K8g kill report,
+`crates/umber-core/src/layers.rs`, `crates/umber-core/src/project.rs`,
+`crates/umber-app/src/vector_panel.rs`, this brief, the K8g kill report,
 `docs/loop/queue.md`, `.dragon/COORDINATION-next-wave.md`, `STATE.md`, and
-`docs/ROADMAP.md`. No app production, raster stencil, dependency, release,
+`docs/ROADMAP.md`. No app UI/behavior, raster stencil, dependency, release,
 public-PR, or out-of-lock work.
 
 ## Verification

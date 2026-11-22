@@ -133,6 +133,10 @@ fn is_default_miter_limit(value: &f32) -> bool {
     *value == DEFAULT_MITER_LIMIT
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// An optional stroke around the shape's outline.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
@@ -155,6 +159,10 @@ pub struct Stroke {
         skip_serializing_if = "is_default_miter_limit"
     )]
     pub miter_limit: f32,
+    /// Preserve SVG 2 leaf non-scaling-stroke semantics for export.
+    /// Additive: legacy and ordinary strokes default to false and omit it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub non_scaling_stroke: bool,
 }
 
 /// A secondary contour in a compound vector shape. It shares the primary
@@ -259,6 +267,7 @@ fn stroke_cache_eq(a: Option<Stroke>, b: Option<Stroke>) -> bool {
                 && a.join == b.join
                 && dash_cache_eq(a.dash, b.dash)
                 && f32_cache_eq(a.miter_limit, b.miter_limit)
+                && a.non_scaling_stroke == b.non_scaling_stroke
         }
         (None, None) => true,
         _ => false,
@@ -1192,6 +1201,7 @@ mod tests {
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1238,6 +1248,7 @@ mod tests {
             fill: [255, 0, 0, 255],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: f32::NAN,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1430,6 +1441,7 @@ mod tests {
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1478,6 +1490,7 @@ mod tests {
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.5,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1514,6 +1527,7 @@ mod tests {
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.5,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1622,6 +1636,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -1646,6 +1661,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -1665,6 +1681,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     miter_limit: 4.0,
+                    non_scaling_stroke: false,
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -1701,6 +1718,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1862,6 +1880,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap,
@@ -1961,6 +1980,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Butt,
@@ -2154,6 +2174,7 @@ mod tests {
                 join: StrokeJoin::Miter,
                 dash: StrokeDash::solid(),
                 miter_limit,
+                non_scaling_stroke: false,
             }),
             anchors: vec![
                 Anchor::corner([0.0, 0.5]),
@@ -2302,6 +2323,7 @@ mod tests {
                     join: StrokeJoin::Miter,
                     dash: StrokeDash::solid(),
                     miter_limit,
+                    non_scaling_stroke: false,
                 }),
                 anchors: vec![
                     Anchor::corner([0.1, 0.1]),
@@ -2329,6 +2351,7 @@ mod tests {
                 join: StrokeJoin::Miter,
                 dash: StrokeDash::solid(),
                 miter_limit,
+                non_scaling_stroke: false,
             }),
             anchors: vec![
                 Anchor::corner([0.0, 0.5]),
@@ -2392,6 +2415,7 @@ mod tests {
                 join: StrokeJoin::Miter,
                 dash: StrokeDash::solid(),
                 miter_limit,
+                non_scaling_stroke: false,
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
             ..VectorShape::empty()
@@ -2415,6 +2439,7 @@ mod tests {
             join: StrokeJoin::Miter,
             dash: StrokeDash::solid(),
             miter_limit: 4.0,
+            non_scaling_stroke: false,
         };
         let old_json = serde_json::to_string(&stroke).expect("default JSON");
         assert!(!old_json.contains("miter_limit"), "{old_json}");
@@ -2430,6 +2455,43 @@ mod tests {
             serde_json::from_str::<Stroke>(&json).expect("custom decode"),
             custom
         );
+    }
+
+    #[test]
+    fn stroke_non_scaling_flag_json_and_cache_identity_are_additive() {
+        let stroke = Stroke {
+            width: 0.125,
+            color: [255, 255, 255, 255],
+            cap: StrokeCap::Butt,
+            join: StrokeJoin::Miter,
+            dash: StrokeDash::solid(),
+            miter_limit: 4.0,
+            non_scaling_stroke: false,
+        };
+        let old_json = serde_json::to_string(&stroke).expect("default JSON");
+        assert!(!old_json.contains("non_scaling_stroke"), "{old_json}");
+        let old: Stroke = serde_json::from_str(&old_json).expect("default decode");
+        assert!(!old.non_scaling_stroke);
+        let custom = Stroke {
+            non_scaling_stroke: true,
+            ..stroke
+        };
+        let json = serde_json::to_string(&custom).expect("custom JSON");
+        assert!(json.contains("\"non_scaling_stroke\":true"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<Stroke>(&json).expect("custom decode"),
+            custom
+        );
+
+        let shape = crate::vector::VectorShape {
+            stroke: Some(stroke),
+            ..crate::vector::VectorShape::empty()
+        };
+        let flagged = crate::vector::VectorShape {
+            stroke: Some(custom),
+            ..shape.clone()
+        };
+        assert!(!shape.same_cache_key(&flagged));
     }
 
     #[test]
@@ -2479,6 +2541,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap,
@@ -2597,6 +2660,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Round,
@@ -2634,6 +2698,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 1.0e6,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -2704,6 +2769,7 @@ mod tests {
         let shape = VectorShape {
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Round,
@@ -2814,6 +2880,7 @@ mod tests {
             closed: true,
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 1.0e6,
                 color: [255, 255, 255, 255],
                 cap: StrokeCap::Round,
@@ -2907,6 +2974,7 @@ mod tests {
             closed: false,
             stroke: Some(Stroke {
                 miter_limit: 4.0,
+                non_scaling_stroke: false,
                 width: 0.125,
                 color: [255, 255, 255, 255],
                 cap: StrokeCap::Butt,
