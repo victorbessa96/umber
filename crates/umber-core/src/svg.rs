@@ -2458,14 +2458,80 @@ fn parse_vector_paint(
     ))
 }
 
+fn trim_css_whitespace(raw: &str) -> &str {
+    raw.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\r' | '\n' | '\u{0c}'))
+}
+
+fn valid_rgb_number(raw: &str, percentage: bool) -> bool {
+    let unsigned = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || (!percentage && fraction.is_some())
+        || fraction.is_some_and(str::is_empty)
+    {
+        return false;
+    }
+    let digits = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(whole) && digits(fraction.unwrap_or_default()))
+        && (!whole.is_empty() || fraction.is_some_and(|part| !part.is_empty()))
+}
+
+/// CSS2 §4.3.6 numeric RGB notation: three comma-separated integers or
+/// percentages, clipped to sRGB. Percentages use nearest-byte conversion, the
+/// same representational rounding rule as `with_alpha`.
+/// Boundary: no CSS4 space/slash syntax, mixed integer/percentage triples,
+/// exponents, `rgba`, named colors, `currentColor`, or integer decimals.
+fn parse_functional_rgb(raw: &str) -> Option<[u8; 3]> {
+    if raw.len() < 5 || !raw.as_bytes()[..4].eq_ignore_ascii_case(b"rgb(") || !raw.ends_with(')') {
+        return None;
+    }
+    let body = raw.get(4..raw.len() - 1)?;
+    let components: Vec<&str> = body.split(',').collect();
+    if components.len() != 3 {
+        return None;
+    }
+    let percentage = trim_css_whitespace(components.first()?).ends_with('%');
+    let mut rgb = [0u8; 3];
+    for (component, slot) in components.into_iter().zip(&mut rgb) {
+        let component = trim_css_whitespace(component);
+        if component.ends_with('%') != percentage {
+            return None;
+        }
+        let number = if percentage {
+            component.strip_suffix('%')?
+        } else {
+            component
+        };
+        if !valid_rgb_number(number, percentage) {
+            return None;
+        }
+        let value = number.parse::<f64>().ok()?;
+        if value.is_nan() {
+            return None;
+        }
+        *slot = if percentage {
+            (value.clamp(0.0, 100.0) * 255.0 / 100.0).round() as u8
+        } else {
+            value.clamp(0.0, 255.0) as u8
+        };
+    }
+    Some(rgb)
+}
+
 fn parse_svg_color(raw: &str, key: &str) -> Result<Option<[u8; 3]>, SvgError> {
     let raw = raw.trim();
     if raw == "none" {
         return Ok(None);
     }
-    let hex = raw.strip_prefix('#').ok_or_else(|| SvgError::Unsupported {
-        what: format!("{key} paint {raw}"),
-    })?;
+    let Some(hex) = raw.strip_prefix('#') else {
+        return parse_functional_rgb(raw)
+            .map(Some)
+            .ok_or_else(|| SvgError::Unsupported {
+                what: format!("{key} paint {raw}"),
+            });
+    };
     if !hex.is_ascii() {
         return Err(SvgError::Unsupported {
             what: format!("{key} paint {raw}"),

@@ -2091,4 +2091,150 @@ mod tests {
             })
         ));
     }
+
+    fn import_functional_fill(paint: &str) -> Result<VectorShape, crate::svg::SvgError> {
+        let svg = format!(
+            "<svg width=\"1\" height=\"1\"><path fill=\"{paint}\" d=\"M0 0 L1 0 L1 1 Z\"/></svg>"
+        );
+        import_svg(svg.as_bytes()).map(|params| params.shape)
+    }
+
+    #[test]
+    fn functional_rgb_accepts_css2_forms_and_clips_gamut() {
+        for (paint, expected) in [
+            ("rgb(255,0,128)", [255, 0, 128]),
+            (" RgB( +255 , -10 , 300 ) ", [255, 0, 255]),
+            ("rgb(0%,50%,100%)", [0, 128, 255]),
+            ("rgb(-10%,110%,25%)", [0, 255, 64]),
+            ("rgb(.5%,1.5%,2.5%)", [1, 4, 6]),
+            ("rgb(000,001,002)", [0, 1, 2]),
+            ("#abc", [170, 187, 204]),
+            ("#A1B2C3", [161, 178, 195]),
+        ] {
+            let shape = import_functional_fill(paint).expect("accepted CSS2 paint");
+            assert_eq!(
+                shape.fill,
+                [expected[0], expected[1], expected[2], 255],
+                "{paint}"
+            );
+        }
+
+        let huge = "9".repeat(400);
+        for (paint, expected) in [
+            (format!("rgb({huge},0,0)"), [255, 0, 0]),
+            (format!("rgb(-{huge},0,0)"), [0, 0, 0]),
+            (format!("rgb({huge}%,0%,0%)"), [255, 0, 0]),
+            (format!("rgb(-{huge}%,0%,0%)"), [0, 0, 0]),
+        ] {
+            let shape = import_functional_fill(&paint).expect("overflowing CSS2 paint clips");
+            assert_eq!(
+                shape.fill,
+                [expected[0], expected[1], expected[2], 255],
+                "{paint}"
+            );
+        }
+    }
+
+    #[test]
+    fn functional_rgb_inherits_composes_opacity_and_exports_hex() {
+        let svg = br##"<svg width="1" height="1" style="fill:rgb(1,2,3); stroke:rgb(10%,20%,30%)" stroke-opacity="0.5" stroke-width="1"><g style="fill:rgb(4,5,6)"><path style="fill:rgb(7, 8, 9); fill-opacity:0.25; stroke: RGB(300, -10, 128)" d="M0 0 L1 0 L1 1 Z"/><path d="M0 0 L0 1 L1 1 Z"/></g></svg>"##;
+        let shapes = import_svg_many(svg).expect("functional RGB inheritance");
+        assert_eq!(shapes.len(), 2);
+        let styled = &shapes[0].shape;
+        assert_eq!(styled.fill, [7, 8, 9, 64]);
+        assert_eq!(
+            styled.stroke.expect("styled stroke").color,
+            [255, 0, 128, 128]
+        );
+        let inherited = &shapes[1].shape;
+        assert_eq!(inherited.fill, [4, 5, 6, 255]);
+        assert_eq!(
+            inherited.stroke.expect("inherited stroke").color,
+            [26, 51, 77, 128]
+        );
+
+        let exported = export_svg(styled).expect("canonical export");
+        assert!(exported.contains("fill=\"#070809\""), "{exported}");
+        assert!(exported.contains("stroke=\"#FF0080\""), "{exported}");
+        assert!(!exported.contains("rgb("), "{exported}");
+        let imported = import_svg(exported.as_bytes()).expect("canonical import");
+        assert_eq!(
+            export_svg(&imported.shape).expect("canonical re-export"),
+            exported
+        );
+    }
+
+    #[test]
+    fn functional_rgb_basic_shapes_use_the_same_paint_entry_point() {
+        let svg = br##"<svg width="2" height="2"><rect width="2" height="2" fill="rgb(9,10,11)" stroke="rgb(12,13,14)" stroke-width="1"/></svg>"##;
+        let params = import_svg(svg).expect("basic-shape functional RGB");
+        assert_eq!(params.shape.fill, [9, 10, 11, 255]);
+        assert_eq!(
+            params.shape.stroke.expect("rect stroke").color,
+            [12, 13, 14, 255]
+        );
+    }
+
+    #[test]
+    fn functional_rgb_rejects_malformed_and_other_color_functions() {
+        for paint in [
+            "rgb()",
+            "rgb(1,2)",
+            "rgb(1,2,3,4)",
+            "rgb(1,,3)",
+            "rgb(1,2,)",
+            "rgb(,1,2,3)",
+            "rgb(1 2 3)",
+            "rgb(1 2 3 / 0.5)",
+            "rgb(1.0,2,3)",
+            "rgb(1%,2,3%)",
+            "rgb(1e2,0,0)",
+            "rgb(NaN,0,0)",
+            "rgb(inf,0,0)",
+            "rgba(1,2,3,1)",
+            "rgb(1,2,3) junk",
+            "rgb (1,2,3)",
+            "rgb(1,2,3))",
+            "rgb(1,2,3",
+            "rgb(1%,2%,3.%)",
+            "rgb(1%,2%,.%)",
+            "rgb(+,2,3)",
+            "rgb(-,2,3)",
+            "rgb(１,2,3)",
+            "hsl(0,100%,50%)",
+            "red",
+            "currentColor",
+        ] {
+            let error = import_functional_fill(paint).expect_err("invalid paint must refuse");
+            assert!(
+                matches!(error, crate::svg::SvgError::Unsupported { ref what } if what.contains("fill paint")),
+                "{paint}: {error:?}"
+            );
+        }
+
+        let hidden = br##"<svg width="1" height="1"><path display="none" fill="rgb(1,2)" d="not a path"/><path fill="#010203" d="M0 0 L1 1"/></svg>"##;
+        match import_svg_many(hidden) {
+            Err(crate::svg::SvgError::Unsupported { what }) => {
+                assert!(what.contains("fill paint"), "{what}")
+            }
+            other => panic!("hidden malformed RGB paint was not validated: {other:?}"),
+        }
+
+        let stroke =
+            br##"<svg width="1" height="1"><path stroke="rgb(1,2)" d="M0 0 L1 1"/></svg>"##;
+        match import_svg(stroke) {
+            Err(crate::svg::SvgError::Unsupported { what }) => {
+                assert!(what.contains("stroke paint"), "{what}")
+            }
+            other => panic!("malformed RGB stroke was not refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raster_functional_rgb_coverage_stays_parser_independent() {
+        let svg =
+            br##"<svg width="2" height="2"><rect width="2" height="2" fill="rgb(1,2,3)"/></svg>"##;
+        let raster = crate::svg::rasterize_svg_default(svg).expect("raster coverage");
+        assert_eq!(raster.coverage(), &[255; 4]);
+    }
 }
