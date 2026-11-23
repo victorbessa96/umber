@@ -22,6 +22,17 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8i CSS2 functional RGB editable-vector import is landed at `0e543038`, with brief
+`7af220fb`. Integer and percentage `rgb()` fill/stroke support optional signs and
+percentage decimals, exact component validation, gamut clipping including 400-digit
+values, shared root/group/leaf/inline-style behavior, opacity composition,
+hidden-leaf validation, basic shapes, canonical uppercase hex export, and typed
+malformed/other-function refusals. Raster/model/app/schema are unchanged.
+Committed-HEAD core is 356/356 with zero doc-test failures; strict
+clippy/fmt/layers/scorecard are clean. Independent OpenCode/DeepSeek R1
+overflow/docs/coverage findings were fixed and final R2 returned SHIP with zero
+findings. Report: `docs/loop/kill-reports/2026-11-23-umber-vector-functional-rgb.md`.
+
 K8h bounded inline SVG style declarations are landed at `6e2e5b40`, with brief
 `3d86ad23`. Fourteen existing paint/display/visibility/vector-effect properties
 support inline declarations with inline-over-presentation precedence,
