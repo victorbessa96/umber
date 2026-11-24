@@ -21,8 +21,8 @@
 //!   colours in a [`RecentColors`] list — pushed once when the popup CLOSES,
 //!   never per drag frame — and shows its [`SwatchGrid`] so one click
 //!   restores a recent colour. umber-gui has no i18n: the caller passes
-//!   [`PickerLabels`]. [`color_button`] stays the stock drop-in (English
-//!   glyph labels, no recents).
+//!   [`PickerLabels`]. [`color_button`] is the stock drop-in and delegates
+//!   here with English glyph labels and per-call empty recents.
 //!
 //! The umber-gui layer rule (egui only) holds: no colour-management crate.
 //! The sRGB transfer functions here are the IEC 61966-2-1 piecewise curve,
@@ -654,75 +654,16 @@ fn swatches(ui: &mut Ui, state: &mut ColorState) -> Response {
     .inner
 }
 
-/// The swatch-button form every colour field uses (C2-12): a swatch of
-/// `linear`; clicking it opens a [`ColorPicker`] popup below. The popup's
-/// [`ColorState`] lives in egui memory under the button's id while it is
-/// open, so the hue survives greys across frames and the "previous"
-/// swatch is the colour the popup OPENED with. Writes `linear` and
-/// reports `changed()` when the colour moved. The drop-in for
-/// `Ui::color_edit_button_rgb` (same linear-RGB contract).
+/// The stock swatch-button form every colour field uses (C2-12), kept as
+/// the drop-in for `Ui::color_edit_button_rgb` (same linear-RGB contract).
+/// This is a thin delegate to [`color_button_with`] with English glyph
+/// labels and a fresh, per-call empty [`RecentColors`]. The list cannot
+/// display or persist recents: it starts empty for every call and is
+/// dropped on return. All popup behavior shares the one implementation.
 pub fn color_button(ui: &mut Ui, linear: &mut [f32; 3]) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(40.0, 18.0), Sense::click());
-    // g7-accesskit-sweep: the inline colour swatch (opens the picker).
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "colour"));
-    if ui.is_rect_visible(rect) {
-        ui.painter()
-            .rect_filled(rect, 3.0, color32(linear.map(linear_to_srgb)));
-        ui.painter().rect_stroke(
-            rect,
-            3.0,
-            ui.visuals().widgets.inactive.bg_stroke,
-            StrokeKind::Inside,
-        );
-    }
-    // wave-a11y-first-pass: the swatch is painter-drawn; Tab reaches it
-    // and Space/Enter opens the picker, so it shows the focus ring.
-    theme::paint_focus_ring(ui, &response);
-    let popup_id = response.id.with("color-popup");
-    let state_id = response.id.with("color-state");
-    let mut open: bool = ui.ctx().data(|d| d.get_temp(popup_id)).unwrap_or(false);
-    if response.clicked() {
-        open = !open;
-        if open {
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(state_id, ColorState::new(*linear)));
-        }
-    }
-    if open {
-        let mut state: ColorState = ui
-            .ctx()
-            .data(|d| d.get_temp(state_id))
-            .unwrap_or_else(|| ColorState::new(*linear));
-        let area = egui::Area::new(popup_id)
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.left_bottom() + Vec2::new(0.0, 4.0))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style())
-                    .show(ui, |ui| ColorPicker::new(&mut state).size(150.0).show(ui))
-            });
-        let picked = area.inner.inner;
-        if picked.changed() {
-            *linear = state.linear();
-            response.mark_changed();
-        }
-        ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
-        // A click outside both the swatch and the popup closes it.
-        let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
-            && !response.clicked()
-            && !area
-                .response
-                .rect
-                .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()));
-        if clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            open = false;
-        } else {
-            // wave-a11y-first-pass: an open picker owns Esc, so the window
-            // it sits in does not close on the same press.
-            super::a11y::claim_escape(ui.ctx());
-        }
-    }
-    ui.ctx().data_mut(|d| d.insert_temp(popup_id, open));
-    response
+    let labels = PickerLabels::default();
+    let mut recents = RecentColors::default();
+    color_button_with(ui, linear, &labels, &mut recents)
 }
 
 fn colours_differ(a: [f32; 3], b: [f32; 3]) -> bool {
@@ -740,8 +681,8 @@ fn colours_differ(a: [f32; 3], b: [f32; 3]) -> bool {
 /// if the final colour differs from the one the popup opened with
 /// ([`ColorState::previous`]) — never per drag frame, and never for an
 /// untouched colour. umber-gui has no i18n, so `labels` comes from the
-/// caller; [`color_button`] stays the stock drop-in with English glyphs and
-/// no recents.
+/// caller. [`color_button`] delegates here with default English glyphs and
+/// a fresh per-call list, so stock callers still see no recents.
 pub fn color_button_with(
     ui: &mut Ui,
     linear: &mut [f32; 3],
@@ -1089,6 +1030,39 @@ mod tests {
             });
             harness.run();
         }
+    }
+
+    #[test]
+    fn color_button_stock_shows_default_sliders_and_no_recents_grid() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            color: [f32; 3],
+            swatch: Rect,
+        }
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(600.0, 900.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    s.swatch = color_button(ui, &mut s.color).rect;
+                },
+                S {
+                    color: [1.0, 0.0, 0.0],
+                    swatch: Rect::NOTHING,
+                },
+            );
+        harness.run();
+        let swatch = harness.state().swatch;
+        click_at(&mut harness, swatch.center());
+        for label in ["R", "G", "B", "H", "S", "V"] {
+            let _ = harness.get_by_role_and_label(egui::accesskit::Role::Slider, label);
+        }
+        assert!(
+            harness
+                .query_all_by_label("colour palette")
+                .next()
+                .is_none(),
+            "the stock popup must not expose the delegate's throwaway recents"
+        );
     }
 
     #[test]
