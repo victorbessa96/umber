@@ -261,6 +261,8 @@ pub const THUMB_KIND_MASK: u8 = 2;
 pub const THUMB_KIND_ENV: u8 = 3;
 /// K2: a brush row's `<stem>.stamp.png` sidecar swatch.
 pub const THUMB_KIND_STAMP: u8 = 4;
+/// A mesh row's generic wireframe glyph, not a geometry preview.
+pub const THUMB_KIND_MESH: u8 = 5;
 
 /// A file's content-ish key for the [`crate::asset_thumbs::ThumbKey`]
 /// cache: path + length + mtime, so a re-exported env map or stamp tip
@@ -282,6 +284,78 @@ fn file_content_key(path: &std::path::Path) -> String {
     format!("file|{}|{}|{}", path.display(), len, mtime)
 }
 
+/// The mesh library search path: bundled `assets/meshes`, then the
+/// executable-side `meshes/`, then persisted extras with first-wins
+/// canonical dedup, matching the smart-library conventions.
+fn mesh_dirs_with(extras: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut dirs = umber_core::bundled::data_paths("assets/meshes");
+    if dirs.is_empty() {
+        dirs.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/meshes"));
+    }
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
+    {
+        dirs.push(exe_dir.join("meshes"));
+    }
+    for extra in extras {
+        let duplicate = dirs.iter().any(|dir| {
+            dir == extra
+                || (dir.exists()
+                    && extra.exists()
+                    && dir.canonicalize().ok() == extra.canonicalize().ok())
+        });
+        if !duplicate {
+            dirs.push(extra.clone());
+        }
+    }
+    dirs
+}
+
+fn mesh_dirs() -> Vec<std::path::PathBuf> {
+    mesh_dirs_with(&document::load_extra_dirs(
+        document::extra_dirs_path().as_deref(),
+    ))
+}
+
+/// Every recognized mesh file in `dirs`, as `(display stem, path)`.
+/// Direct files only, sorted by stem, first-directory-wins dedup. Detection
+/// is extension-only: a recognized-but-corrupt file remains a row and is
+/// never parsed during scanning.
+fn list_meshes(dirs: &[std::path::PathBuf]) -> Vec<(String, std::path::PathBuf)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.is_file() && umber_mesh::detect_format(path).is_ok())
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !seen.insert(file.to_ascii_lowercase()) {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or(file);
+            out.push((stem, path));
+        }
+    }
+    out.sort_by(|a, b| {
+        a.0.to_ascii_lowercase()
+            .cmp(&b.0.to_ascii_lowercase())
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    out
+}
+
 /// What the shell must apply after a library row's click.
 #[derive(Debug, Default)]
 pub struct LibraryOutcome {
@@ -300,6 +374,8 @@ pub struct LibraryOutcome {
     /// A smart filter file to apply to the ACTIVE layer as one undo step
     /// (the shell's `apply_filter_file` → `filter_apply` plane-op stack).
     pub filter: Option<std::path::PathBuf>,
+    /// A mesh file to load through the shell's exact `load_mesh_path` path.
+    pub mesh: Option<std::path::PathBuf>,
 }
 
 /// The brush shelf's swatch edge, points (UI/UX pass U3).
@@ -1062,6 +1138,59 @@ pub fn library_ui(
                 ui.label(tr("assets.no-matches"));
             }
         });
+    // Meshes: the sixth category, default closed. Scanning is lazy and
+    // extension-only; activation goes through the shell's load_mesh_path.
+    egui::CollapsingHeader::new(tr("assets.meshes"))
+        .id_salt("assets-meshes")
+        .default_open(false)
+        .show(ui, |ui| {
+            let cache_id = egui::Id::new(("assets-meshes", state.scan_epoch));
+            let cached: Option<Vec<(String, std::path::PathBuf)>> = ui.ctx().data(|d| {
+                d.get_temp::<Option<Vec<(String, std::path::PathBuf)>>>(cache_id)
+                    .flatten()
+            });
+            let meshes = match cached {
+                Some(list) => list,
+                None => {
+                    let scanned = list_meshes(&mesh_dirs());
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(cache_id, Some(scanned.clone())));
+                    scanned
+                }
+            };
+            let mut shown = 0usize;
+            for (name, path) in &meshes {
+                if !matches(name) {
+                    continue;
+                }
+                shown += 1;
+                ui.horizontal(|ui| {
+                    let key = format!("mesh|{}", swatch_card().1);
+                    if let Some(tex) = state.thumb(ui.ctx(), THUMB_KIND_MESH, name, &key, || {
+                        crate::asset_thumbs::mesh_glyph(crate::asset_thumbs::THUMB_PX)
+                    }) {
+                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                            tex,
+                            egui::vec2(24.0, 24.0),
+                        )));
+                    }
+                    let row = ui
+                        .add(egui::Label::new(name).sense(egui::Sense::click()))
+                        .on_hover_text(path.display().to_string());
+                    row.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name.as_str())
+                    });
+                    if row.clicked() {
+                        out.mesh = Some(path.clone());
+                    }
+                });
+            }
+            if meshes.is_empty() {
+                ui.label(tr("assets.empty"));
+            } else if shown == 0 {
+                ui.label(tr("assets.no-matches"));
+            }
+        });
     persist_saved(state, saved_path);
     persist_search(state, search_path);
     out
@@ -1122,6 +1251,7 @@ mod kittest {
                         || o.brush.is_some()
                         || o.env.is_some()
                         || o.filter.is_some()
+                        || o.mesh.is_some()
                     {
                         s.hit = Some(o);
                     }
@@ -1490,6 +1620,96 @@ mod kittest {
         let _ = std::fs::remove_file(&filter_path);
     }
 
+    /// The sixth category is default closed, lazily lists recognized meshes
+    /// without parsing them, caches its glyph, and yields the exact path.
+    #[test]
+    fn the_meshes_category_is_closed_by_default_and_yields_the_path_on_click() {
+        let exe_meshes = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("meshes");
+        std::fs::create_dir_all(&exe_meshes).unwrap();
+        let mesh_path = exe_meshes.join("kittest-quad.OBJ");
+        std::fs::write(&mesh_path, "definitely not an obj, and never parsed here").unwrap();
+        let mut h = harness_full(seeded_brushes(), None, None, [480.0, 2400.0]);
+        assert!(h.run_ok().is_some());
+        let header = tr("assets.meshes");
+        assert!(h.query_by_label(&header).is_some(), "the header draws");
+        assert!(
+            h.query_by_label("kittest-quad").is_none(),
+            "closed by default: no mesh rows in the resting panel"
+        );
+        h.get_by_label(&header).click();
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("kittest-quad").is_some(),
+            "opened: the malformed recognized file still lists without parsing"
+        );
+        assert!(
+            h.state()
+                .panel
+                .thumbs
+                .keys()
+                .any(|k| { k.kind == THUMB_KIND_MESH && k.name == "kittest-quad" }),
+            "the generic mesh glyph is cached under THUMB_KIND_MESH"
+        );
+        h.state_mut().panel.search = "zzz-no-mesh".into();
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("kittest-quad").is_none(),
+            "search filters the row"
+        );
+        assert!(h.query_all_by_label(&tr("assets.no-matches")).count() >= 1);
+        h.state_mut().panel.search.clear();
+        assert!(h.run_ok().is_some());
+        h.get_by_label("kittest-quad").click();
+        assert!(h.run_ok().is_some());
+        let out = h
+            .state_mut()
+            .hit
+            .take()
+            .expect("the row click produced an outcome");
+        let path = out.mesh.expect("the mesh outcome carries the path");
+        assert_eq!(path, mesh_path, "the clicked row's exact file");
+        let _ = std::fs::remove_file(mesh_path);
+    }
+
+    /// An empty scan result remains cached until scan_epoch changes; a new
+    /// file created afterward is not discovered until the next epoch.
+    #[test]
+    fn empty_mesh_results_stay_cached_until_scan_epoch_changes() {
+        let exe_meshes = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("meshes");
+        std::fs::create_dir_all(&exe_meshes).unwrap();
+        let mesh_path = exe_meshes.join("cache-probe.obj");
+        let _ = std::fs::remove_file(&mesh_path);
+        let mut h = harness_full(seeded_brushes(), None, None, [480.0, 2400.0]);
+        assert!(h.run_ok().is_some());
+        h.get_by_label(&tr("assets.meshes")).click();
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("cache-probe").is_none(),
+            "the first empty scan has no row"
+        );
+        std::fs::write(&mesh_path, "still not parsed during scanning").unwrap();
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("cache-probe").is_none(),
+            "Some(empty) remains cached: the new file is not discovered yet"
+        );
+        h.state_mut().panel.scan_epoch += 1;
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("cache-probe").is_some(),
+            "the epoch bump forces a rescan"
+        );
+        let _ = std::fs::remove_file(mesh_path);
+    }
+
     /// K2: a search that empties a non-empty list shows the distinct
     /// no-matches label (once per emptied category); an empty library
     /// would still show assets.empty, which stays absent here.
@@ -1699,6 +1919,7 @@ mod kittest {
         for key in [
             "assets.env-maps",
             "assets.filters",
+            "assets.meshes",
             "assets.filter-apply-tip",
             "assets.no-matches",
             "assets.saved-searches",
@@ -1792,6 +2013,60 @@ mod tests {
         persist_saved(&mut d, None);
         assert_eq!(d.saved.len(), 1, "the session keeps the list");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mesh_dirs_preserve_bundled_exe_and_extra_order_without_duplicates() {
+        let dir =
+            std::env::temp_dir().join(format!("umber-assets-mesh-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        let dirs = mesh_dirs_with(&[dir.clone(), canonical.clone()]);
+        assert!(dirs.len() >= 3, "bundled + exe + one extra: {dirs:?}");
+        assert_eq!(dirs.last(), Some(&canonical), "the extra comes last");
+        let count = dirs.iter().filter(|d| **d == canonical).count();
+        assert_eq!(count, 1, "canonical duplicate suppressed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_meshes_accepts_all_formats_sorts_dedups_and_never_parses() {
+        let base =
+            std::env::temp_dir().join(format!("umber-assets-mesh-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for (name, body) in [
+            ("a.obj", "not really an obj"),
+            ("b.GLTF", "not gltf"),
+            ("c.glb", "not glb"),
+            ("d.FBX", "not fbx"),
+            ("e.usd", "not usd"),
+            ("f.USDA", "not usda"),
+            ("g.usdc", "not usdc"),
+            ("h.USDZ", "not usdz"),
+            ("ignore.txt", "not a mesh"),
+            ("no-extension", "not a mesh"),
+            ("same.OBJ", "first wins"),
+            ("same.obj", "second loses"),
+        ] {
+            std::fs::write(a.join(name), body).unwrap();
+        }
+        std::fs::write(b.join("same.obj"), "second loses").unwrap();
+        let got = list_meshes(&[base.join("missing"), a.clone(), b.clone()]);
+        let names: Vec<String> = got.iter().map(|(name, _)| name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "same"],
+            "sorted stems with txt/extensionless rejected: {names:?}"
+        );
+        assert_eq!(got.last().map(|(_, path)| path), Some(&a.join("same.OBJ")));
+        assert!(got.iter().any(|(_, path)| path.ends_with("d.FBX")));
+        assert!(!got.iter().any(|(_, path)| path.ends_with("ignore.txt")));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

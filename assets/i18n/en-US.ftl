@@ -1224,6 +1224,7 @@ assets =
     .materials = Smart materials
     .env-maps = Environment maps
     .filters = Filters
+    .meshes = Meshes
     .filter-apply-tip = Apply this filter to the active layer (one undo step)
     .empty = Nothing here yet.
     .no-matches = No matches for this search.

@@ -14,7 +14,7 @@
 //! The panel caches textures keyed by (kind, name, content hash of the
 //! preset's JSON) — a changed preset file regenerates its swatch.
 
-use egui::ColorImage;
+use egui::{Color32, ColorImage};
 use std::path::Path;
 use umber_core::smart::{MaskSource, SmartMask, SmartMaterial};
 
@@ -371,9 +371,62 @@ pub fn env_preview(path: &Path, size: u32) -> Option<ColorImage> {
     }
 }
 
+/// A generic mesh-row glyph: deterministic wireframe geometry, never a
+/// file parse or an eager content render. Used by the Meshes category.
+pub fn mesh_glyph(size: u32) -> ColorImage {
+    let size = size.max(2) as usize;
+    let bg = Color32::from_rgb(24, 28, 34);
+    let ink = Color32::from_rgb(140, 190, 255);
+    let mut img = ColorImage::filled([size, size], bg);
+    let line = |x0: i32, y0: i32, x1: i32, y1: i32, img: &mut ColorImage| {
+        let (mut x, mut y) = (x0, y0);
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            if x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size {
+                img.pixels[y as usize * size + x as usize] = ink;
+            }
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = err * 2;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    };
+    let n = size as i32;
+    let top = (n / 2, 1);
+    let left = (1, n * 3 / 4);
+    let right = (n - 2, n * 3 / 4);
+    let center = (n / 2, n / 2);
+    line(top.0, top.1, left.0, left.1, &mut img);
+    line(left.0, left.1, right.0, right.1, &mut img);
+    line(right.0, right.1, top.0, top.1, &mut img);
+    line(center.0, center.1, left.0, left.1, &mut img);
+    line(center.0, center.1, right.0, right.1, &mut img);
+    img
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_glyph_is_deterministic_and_draws_geometry() {
+        let a = mesh_glyph(32);
+        let b = mesh_glyph(32);
+        assert_eq!(a.pixels, b.pixels);
+        assert!(a.pixels.iter().any(|p| *p != Color32::from_rgb(24, 28, 34)));
+    }
 
     /// U4: the default swatch is the dark card exactly; a light card
     /// lightens the background and keeps the stroke.

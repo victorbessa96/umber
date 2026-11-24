@@ -1243,6 +1243,7 @@ assets =
     .materials = Materiais inteligentes
     .env-maps = Mapas de ambiente
     .filters = Filtros
+    .meshes = Malhas
     .filter-apply-tip = Aplica este filtro à camada ativa (uma etapa de desfazer)
     .empty = Nada aqui ainda.
     .no-matches = Nenhum resultado para esta busca.

@@ -423,6 +423,7 @@ type DockDrain = (
     Vec<String>,
     Vec<std::path::PathBuf>,
     Vec<(std::path::PathBuf, u64)>,
+    Vec<std::path::PathBuf>,
     Option<f32>,
     Option<f32>,
 );
@@ -461,6 +462,9 @@ struct PanelViewer<'a> {
     /// `(path, active layer)` (drained by the app after the dock and
     /// applied through `UmberApp::apply_filter_file` — one undo step).
     filter_loads: Vec<(std::path::PathBuf, u64)>,
+    /// The Assets browser's mesh row clicks, drained by the app after the
+    /// dock and applied through the exact `load_mesh_path` transaction.
+    mesh_loads: Vec<std::path::PathBuf>,
     bakes: &'a mut BakesPanel,
     /// The Assets panel's session state (R-C1's library browser).
     assets: &'a mut assets_panel::AssetsPanel,
@@ -1542,6 +1546,11 @@ impl TabViewer for PanelViewer<'_> {
                             path.display()
                         );
                     }
+                }
+                if let Some(path) = &outcome.mesh {
+                    // The mesh row is applied by the app after the dock through
+                    // the exact existing import transaction.
+                    self.mesh_loads.push(path.clone());
                 }
                 // The import dialog (the R-C1 brief: the three import
                 // sections MOVE out of the tab body into one Import…
@@ -5934,171 +5943,188 @@ impl eframe::App for UmberApp {
             }
         }
         let flyout_panel = self.rails.flyout_tab().map(|(side, p)| (side, p.clone()));
-        let (home_actions, pick_notices, env_loads, filter_loads, flow_alpha, stamp_angle): DockDrain =
-            CentralPanel::default()
-                .show(ui, |ui| {
-                    let mut dock_style = Style::from_egui(ui.style());
-                    // g7-density-scale: the separators' grab width follows the
-                    // hit-zone preference (4 pt standard, 8 pt tablet). The
-                    // value only changes on a preference change, so this
-                    // per-frame write is exactly the apply-on-change pattern
-                    // the Preferences window's ruling pins.
-                    dock_style.separator.extra_interact_width = self
-                        .prefs
-                        .splitter_hit_zone
-                        .hit_zone()
-                        .extra_interact_width();
-                    let tab_font = egui::TextStyle::Button.resolve(ui.style());
-                    let mut viewer = PanelViewer {
-                        ctx: ui.ctx().clone(),
-                        tab_font: tab_font.clone(),
-                        assets: &mut self.state.assets_panel,
-                        viewport: &mut self.state.viewport,
-                        uv_view: &mut self.state.uv_view,
-                        home_recent,
-                        home_recovery,
-                        home_actions: Vec::new(),
-                        pick_notices: Vec::new(),
-                        env_loads: Vec::new(),
-                        filter_loads: Vec::new(),
-                        bakes: &mut self.state.bakes,
-                        export: &mut self.state.export,
-                        graph: &mut self.state.graph,
-                        mesh: self.state.mesh.as_ref(),
-                        mesh_path: self.state.mesh_path.as_deref(),
-                        gpu: &self.gpu,
-                        paint: self.state.paint.as_mut(),
-                        doc: &mut self.state.doc,
-                        brush: &mut self.brush_panel,
-                        pending_flow_alpha: &mut self.state.pending_flow_alpha,
-                        pending_stamp_angle: &mut self.state.pending_stamp_angle,
-                        properties_rail: &mut self.properties_rail,
-                        icons: &self.icons,
-                        polygon_fill: &mut self.state.polygon_fill,
-                        path_tool: &mut self.state.path_tool,
-                        vector_edit: &mut self.state.vector_edit,
-                        material_defs: &mut self.state.material_defs,
-                        material_badges: &self.state.material_badges,
-                        material_status: self.state.material_status.as_deref(),
-                        material_states: &mut self.state.material_states,
-                        display: &mut self.state.display,
-                        display_lut_state: &mut self.state.display_lut,
-                        #[cfg(feature = "ocio")]
-                        ocio_state: &mut self.state.ocio_state,
-                        display_lut: effective_lut,
-                        postfx: &mut self.state.postfx,
-                        postfx_panel: &mut self.state.postfx_panel,
-                        mesh_import: &mut self.state.mesh_import,
-                        parked_texture_sets: &mut self.state.parked_texture_sets,
-                        psd_import: &mut self.state.psd_import,
-                        spp_import: &mut self.state.spp_import,
-                        base_visible: &mut self.state.base_visible,
-                        thumbnails: &mut self.state.thumbnails,
-                        layer_gestures: &mut self.state.layer_gestures,
-                        mesh_parts: self.state.mesh_parts.as_ref(),
-                        geometry_clipboard: &mut self.state.geometry_clipboard,
-                        pending_resize: &mut self.state.pending_resize,
-                        fill_badges: &self.state.fill_badges,
-                        import_badges: &self.state.import_badges,
-                        dormant: &self.state.dormant,
-                        stencil: &mut self.state.stencil,
-                        projection: &mut self.state.projection,
-                        projection_view_rect: &mut self.state.projection_view_rect,
-                        store: store.as_ref(),
-                        hdr_mode: &mut self.hdr_mode,
-                        stylus_pressure,
-                        group_tabs: self
-                            .dock
-                            .iter_leaves()
-                            .map(|(path, leaf)| (path, leaf.tabs.clone()))
-                            .collect(),
-                        closed_panels: shell_menu::closed_panels(&self.dock),
-                        group_pick: None,
-                        show_brush_shelf: &self.prefs.brush_shelf,
-                    };
-                    // R-LAYOUT-1: no leaf narrower than its panel's floor while
-                    // the window can hold them (egui_dock lays splits out from
-                    // fractions alone). A fitting layout is left untouched.
-                    if std::mem::take(&mut self.compact_layout_pending) {
-                        workspaces::compact_for_width(
-                            &mut self.dock,
-                            ui.available_rect_before_wrap().width(),
-                        );
-                    }
-                    dock_floor::apply_floors(
+        let (
+            home_actions,
+            pick_notices,
+            env_loads,
+            filter_loads,
+            mesh_loads,
+            flow_alpha,
+            stamp_angle,
+        ): DockDrain = CentralPanel::default()
+            .show(ui, |ui| {
+                let mut dock_style = Style::from_egui(ui.style());
+                // g7-density-scale: the separators' grab width follows the
+                // hit-zone preference (4 pt standard, 8 pt tablet). The
+                // value only changes on a preference change, so this
+                // per-frame write is exactly the apply-on-change pattern
+                // the Preferences window's ruling pins.
+                dock_style.separator.extra_interact_width = self
+                    .prefs
+                    .splitter_hit_zone
+                    .hit_zone()
+                    .extra_interact_width();
+                let tab_font = egui::TextStyle::Button.resolve(ui.style());
+                let mut viewer = PanelViewer {
+                    ctx: ui.ctx().clone(),
+                    tab_font: tab_font.clone(),
+                    assets: &mut self.state.assets_panel,
+                    viewport: &mut self.state.viewport,
+                    uv_view: &mut self.state.uv_view,
+                    home_recent,
+                    home_recovery,
+                    home_actions: Vec::new(),
+                    pick_notices: Vec::new(),
+                    env_loads: Vec::new(),
+                    filter_loads: Vec::new(),
+                    mesh_loads: Vec::new(),
+                    bakes: &mut self.state.bakes,
+                    export: &mut self.state.export,
+                    graph: &mut self.state.graph,
+                    mesh: self.state.mesh.as_ref(),
+                    mesh_path: self.state.mesh_path.as_deref(),
+                    gpu: &self.gpu,
+                    paint: self.state.paint.as_mut(),
+                    doc: &mut self.state.doc,
+                    brush: &mut self.brush_panel,
+                    pending_flow_alpha: &mut self.state.pending_flow_alpha,
+                    pending_stamp_angle: &mut self.state.pending_stamp_angle,
+                    properties_rail: &mut self.properties_rail,
+                    icons: &self.icons,
+                    polygon_fill: &mut self.state.polygon_fill,
+                    path_tool: &mut self.state.path_tool,
+                    vector_edit: &mut self.state.vector_edit,
+                    material_defs: &mut self.state.material_defs,
+                    material_badges: &self.state.material_badges,
+                    material_status: self.state.material_status.as_deref(),
+                    material_states: &mut self.state.material_states,
+                    display: &mut self.state.display,
+                    display_lut_state: &mut self.state.display_lut,
+                    #[cfg(feature = "ocio")]
+                    ocio_state: &mut self.state.ocio_state,
+                    display_lut: effective_lut,
+                    postfx: &mut self.state.postfx,
+                    postfx_panel: &mut self.state.postfx_panel,
+                    mesh_import: &mut self.state.mesh_import,
+                    parked_texture_sets: &mut self.state.parked_texture_sets,
+                    psd_import: &mut self.state.psd_import,
+                    spp_import: &mut self.state.spp_import,
+                    base_visible: &mut self.state.base_visible,
+                    thumbnails: &mut self.state.thumbnails,
+                    layer_gestures: &mut self.state.layer_gestures,
+                    mesh_parts: self.state.mesh_parts.as_ref(),
+                    geometry_clipboard: &mut self.state.geometry_clipboard,
+                    pending_resize: &mut self.state.pending_resize,
+                    fill_badges: &self.state.fill_badges,
+                    import_badges: &self.state.import_badges,
+                    dormant: &self.state.dormant,
+                    stencil: &mut self.state.stencil,
+                    projection: &mut self.state.projection,
+                    projection_view_rect: &mut self.state.projection_view_rect,
+                    store: store.as_ref(),
+                    hdr_mode: &mut self.hdr_mode,
+                    stylus_pressure,
+                    group_tabs: self
+                        .dock
+                        .iter_leaves()
+                        .map(|(path, leaf)| (path, leaf.tabs.clone()))
+                        .collect(),
+                    closed_panels: shell_menu::closed_panels(&self.dock),
+                    group_pick: None,
+                    show_brush_shelf: &self.prefs.brush_shelf,
+                };
+                // R-LAYOUT-1: no leaf narrower than its panel's floor while
+                // the window can hold them (egui_dock lays splits out from
+                // fractions alone). A fitting layout is left untouched.
+                if std::mem::take(&mut self.compact_layout_pending) {
+                    workspaces::compact_for_width(
                         &mut self.dock,
-                        ui.available_rect_before_wrap(),
-                        Panel::min_size,
+                        ui.available_rect_before_wrap().width(),
                     );
-                    DockArea::new(&mut self.dock)
-                        .style(dock_style.clone())
-                        // The panel-group menu (U2-3): the dock's add button,
-                        // whose popup is `PanelViewer::add_popup`.
-                        .show_add_buttons(true)
-                        .show_add_popup(true)
-                        // F3 (2026-11-10 round-3 audit): 40 pt of every tab
-                        // and 48 pt of every strip were close chrome; hide
-                        // per-tab close, close-all and collapse, keep the
-                        // group menu. Tabs close via the group menu / rail.
-                        .show_close_buttons(false)
-                        .show_leaf_close_all_buttons(false)
-                        .show_leaf_collapse_buttons(false)
-                        .show_inside(ui, &mut viewer);
-                    // U7 flyout: the folded panel drawn by the same viewer
-                    // over the canvas edge beside its rail. Escape or the
-                    // rail icon closes it.
-                    if let Some((side, mut panel)) = flyout_panel.clone() {
-                        let area = ui.max_rect();
-                        let width = (area.width() * 0.32).clamp(260.0, 420.0);
-                        let x = match side {
-                            dock_rail::Side::Left => area.left(),
-                            dock_rail::Side::Right => area.right() - width,
-                        };
-                        let frame = egui::Frame::popup(ui.style());
-                        egui::Area::new(Id::new("umber-rail-flyout"))
-                            .order(egui::Order::Foreground)
-                            .fixed_pos(egui::pos2(x, area.top()))
-                            .show(ui.ctx(), |ui| {
-                                frame.show(ui, |ui| {
-                                    ui.set_width(width - 16.0);
-                                    ui.set_height(area.height() - 16.0);
-                                    ui.strong(panel_title(&panel));
-                                    ui.separator();
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        viewer.ui(ui, &mut panel);
-                                    });
-                                })
-                            });
-                    }
-                    if let Some(pick) = viewer.group_pick.take() {
-                        if shell_menu::apply_group_pick(&mut self.dock, pick) {
-                            ui.ctx().request_repaint();
-                        }
-                    }
-                    // The selected tab stays visible (g5-tab-overflow): a leaf
-                    // whose active tab changed this frame (a click, a panel
-                    // toggled in, a restored layout) scrolls it into the strip.
-                    if scroll_active_tabs_into_view(
-                        &mut self.dock,
-                        &mut self.tab_active_seen,
-                        ui.ctx(),
-                        &tab_font,
-                        &dock_style,
-                    ) {
+                }
+                dock_floor::apply_floors(
+                    &mut self.dock,
+                    ui.available_rect_before_wrap(),
+                    Panel::min_size,
+                );
+                DockArea::new(&mut self.dock)
+                    .style(dock_style.clone())
+                    // The panel-group menu (U2-3): the dock's add button,
+                    // whose popup is `PanelViewer::add_popup`.
+                    .show_add_buttons(true)
+                    .show_add_popup(true)
+                    // F3 (2026-11-10 round-3 audit): 40 pt of every tab
+                    // and 48 pt of every strip were close chrome; hide
+                    // per-tab close, close-all and collapse, keep the
+                    // group menu. Tabs close via the group menu / rail.
+                    .show_close_buttons(false)
+                    .show_leaf_close_all_buttons(false)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut viewer);
+                // U7 flyout: the folded panel drawn by the same viewer
+                // over the canvas edge beside its rail. Escape or the
+                // rail icon closes it.
+                if let Some((side, mut panel)) = flyout_panel.clone() {
+                    let area = ui.max_rect();
+                    let width = (area.width() * 0.32).clamp(260.0, 420.0);
+                    let x = match side {
+                        dock_rail::Side::Left => area.left(),
+                        dock_rail::Side::Right => area.right() - width,
+                    };
+                    let frame = egui::Frame::popup(ui.style());
+                    egui::Area::new(Id::new("umber-rail-flyout"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(egui::pos2(x, area.top()))
+                        .show(ui.ctx(), |ui| {
+                            frame.show(ui, |ui| {
+                                ui.set_width(width - 16.0);
+                                ui.set_height(area.height() - 16.0);
+                                ui.strong(panel_title(&panel));
+                                ui.separator();
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    viewer.ui(ui, &mut panel);
+                                });
+                            })
+                        });
+                }
+                if let Some(pick) = viewer.group_pick.take() {
+                    if shell_menu::apply_group_pick(&mut self.dock, pick) {
                         ui.ctx().request_repaint();
                     }
+                }
+                // The selected tab stays visible (g5-tab-overflow): a leaf
+                // whose active tab changed this frame (a click, a panel
+                // toggled in, a restored layout) scrolls it into the strip.
+                if scroll_active_tabs_into_view(
+                    &mut self.dock,
+                    &mut self.tab_active_seen,
+                    ui.ctx(),
+                    &tab_font,
+                    &dock_style,
+                ) {
+                    ui.ctx().request_repaint();
+                }
 
-                    let actions: Vec<crate::empty_state::HomeCardAction> =
-                        viewer.home_actions.drain(..).collect();
-                    let notices: Vec<String> = viewer.pick_notices.drain(..).collect();
-                    let env_loads: Vec<std::path::PathBuf> = viewer.env_loads.drain(..).collect();
-                    let filter_loads: Vec<(std::path::PathBuf, u64)> =
-                        viewer.filter_loads.drain(..).collect();
-                    let flow_alpha = viewer.viewport.live_flow_alpha.take();
-                    let stamp_angle = viewer.viewport.live_stamp_angle.take();
-                    (actions, notices, env_loads, filter_loads, flow_alpha, stamp_angle)
-                })
-                .inner;
+                let actions: Vec<crate::empty_state::HomeCardAction> =
+                    viewer.home_actions.drain(..).collect();
+                let notices: Vec<String> = viewer.pick_notices.drain(..).collect();
+                let env_loads: Vec<std::path::PathBuf> = viewer.env_loads.drain(..).collect();
+                let filter_loads: Vec<(std::path::PathBuf, u64)> =
+                    viewer.filter_loads.drain(..).collect();
+                let mesh_loads: Vec<std::path::PathBuf> = viewer.mesh_loads.drain(..).collect();
+                let flow_alpha = viewer.viewport.live_flow_alpha.take();
+                let stamp_angle = viewer.viewport.live_stamp_angle.take();
+                (
+                    actions,
+                    notices,
+                    env_loads,
+                    filter_loads,
+                    mesh_loads,
+                    flow_alpha,
+                    stamp_angle,
+                )
+            })
+            .inner;
         // U7: the rail clicks and Escape, applied after the dock.
         if flyout_panel.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.rails.flyout = None;
@@ -6128,6 +6154,11 @@ impl eframe::App for UmberApp {
         // active at the click, each as ONE undo step (`apply_filter_file`).
         for (path, layer) in filter_loads {
             self.apply_filter_file(&path, layer);
+        }
+        // The Assets browser's mesh rows: applied through the exact existing
+        // import transaction, with the app owning the full state change.
+        for path in mesh_loads {
+            self.load_mesh_path(path);
         }
         // The Ctrl+LMB chord's live values: stashed here, adopted into the
         // active preset at the brush sync above (next frame at latest).
