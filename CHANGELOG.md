@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Docs — row-156 scoping and reconciliation:** `docs/research/2026-11-24-row156-scoping.md` records OBJ landed and a concrete gate for every remaining candidate. Six verified requirement hashes are filled; XI2/SVG/OBJ rows are current; the stale agent-contract duplicate is retired. GLB export is the next named code follow-up. Report: `docs/loop/kill-reports/2026-11-24-row156-scoping.md`.
+
 - **Added — OBJ mesh export round-trip:** `8c9be579` adds deterministic OBJ geometry with typed ragged/over-cap/write failures, bounded names, and real `load`/`load_obj` round-trips through the hostile-output battery. R1 name/coverage and R2 write-path findings fixed, full export 94+7/0, R3 SHIP. GLB and material/texture references remain separate follow-ups. Report: `docs/loop/kill-reports/2026-11-24-umber-obj-export.md`.
 
 - **Verified — control channel + bridge live smoke:** check 5 now records wrong-token unauthorized+EOF, authed control methods and UI inspection, a decoded 1296×729 PNG with 3,056 colors, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. Checks 1–4 remain desktop-owed. Report: `docs/loop/kill-reports/2026-11-24-umber-control-smoke.md`.

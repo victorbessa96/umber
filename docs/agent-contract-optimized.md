@@ -1,3 +1,8 @@
+> **RETIRED 2026-11-24.** The live agent contract is [`../AGENTS.md`](../AGENTS.md).
+> This snapshot is kept for provenance only. It is not the work order and must
+> not override the live contract, its 16-crate workspace map, the two-gate
+> battery, or the ratified `.spp` import split.
+
 # Umber — agent contract
 
 Rust 3D texture-painting DCC. 14-crate workspace, wgpu 30 + egui/eframe 0.36, toolchain pinned 1.97.0.

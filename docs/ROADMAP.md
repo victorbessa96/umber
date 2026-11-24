@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-OBJ mesh export is implemented at `8c9be5793f4fe63b8db0b4e8f8900f4bffc1ffa1`, with brief `b8e12d0b` and claim `8383a09b`. Deterministic OBJ geometry, bounded names, typed ragged/over-cap/write failures, and real `load`/`load_obj` round-trips through the hostile-output battery are landed. R1 name/coverage and R2 write-path findings fixed, full export 94+7/0, strict export clippy clean, R3 `deleg_6453e892` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. Remaining row-156 scoping and docs reconciliation are next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Row-156 scoping and docs reconciliation is complete. `docs/research/2026-11-24-row156-scoping.md` records OBJ landed and a concrete gate for every remaining candidate: GLB/material/texture/EyeDepth/parity/theme as named code follow-ups, COW by 8K A/B measurement, packaging release/platform gated. Six verified requirement hashes are filled; XI2/SVG/OBJ rows are current; the stale agent-contract duplicate is retired. Final report/queue hashes and origin verification remain. GLB export is the next named code follow-up. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
