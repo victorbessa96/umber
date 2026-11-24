@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Added — OBJ mesh export round-trip:** `8c9be579` adds deterministic OBJ geometry with typed ragged/over-cap/write failures, bounded names, and real `load`/`load_obj` round-trips through the hostile-output battery. R1 name/coverage and R2 write-path findings fixed, full export 94+7/0, R3 SHIP. GLB and material/texture references remain separate follow-ups. Report: `docs/loop/kill-reports/2026-11-24-umber-obj-export.md`.
+
 - **Verified — control channel + bridge live smoke:** check 5 now records wrong-token unauthorized+EOF, authed control methods and UI inspection, a decoded 1296×729 PNG with 3,056 colors, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. Checks 1–4 remain desktop-owed. Report: `docs/loop/kill-reports/2026-11-24-umber-control-smoke.md`.
 
 - **Changed — bounded SVG `rgba()` paint:** `8baf5e2d` parses CSS2 `rgba()` with integer/percentage RGB and finite alpha, composes multiplicatively with fill/stroke opacity, and keeps canonical hex+opacity export. R1 overflow finding fixed, exact rgba 2/2, full core 358/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-svg-rgba.md`.

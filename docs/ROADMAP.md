@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-Control channel + bridge live smoke is complete. Check 5 records wrong-token unauthorized+EOF, authed control methods and UI inspection, a decoded 1296×729 PNG with 3,056 colors and matching dimensions, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. App cleanup and scratch removal verified; no app source changed. Final report/queue hashes and origin verification remain. Row-156 idea-backlog verification is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+OBJ mesh export is implemented at `8c9be5793f4fe63b8db0b4e8f8900f4bffc1ffa1`, with brief `b8e12d0b` and claim `8383a09b`. Deterministic OBJ geometry, bounded names, typed ragged/over-cap/write failures, and real `load`/`load_obj` round-trips through the hostile-output battery are landed. R1 name/coverage and R2 write-path findings fixed, full export 94+7/0, strict export clippy clean, R3 `deleg_6453e892` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. Remaining row-156 scoping and docs reconciliation are next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
