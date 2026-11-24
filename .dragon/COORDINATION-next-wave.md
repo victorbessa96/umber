@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** Assets browser mesh category is implemented at `6ef031944f8b3333d4bc50c440c9c96739209973`, on brief `9935d582aa82` and claim `752c32ab4fa0`; queue row 589 and report `docs/loop/kill-reports/2026-11-24-umber-assets-mesh.md`. Lazy all-extension listing uses first-wins dirs and no eager parsing; `LibraryOutcome.mesh`, `THUMB_KIND_MESH=5`, a sixth default-closed category with generic glyph, and `mesh_loads` through the exact `load_mesh_path` transaction are wired. R1 empty-cache and coverage findings fixed, full mesh 32/32, strict app clippy clean, full app 1,276/0, R2 `deleg_86d758c2` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. OccluderScope combo→request→resolution kittest is next. This status-doc commit releases `razul-assets-mesh`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** OccluderScope combo→request→resolution kittest is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-occluder-kittest`, on committed brief `f9bdd6d47444` and queue row 590. Base `927c0470e0eede538e7bcb5e02c098d62f3bf67a` was clean and origin-equal, with no live sibling or prior lock. Drive the real combo and bake_current with the ground-plus-slab mesh, assert request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path, then strict umber-app clippy/tests, independent review, report, and one safe-push wave. No second kill, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 
