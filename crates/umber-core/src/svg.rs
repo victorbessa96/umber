@@ -2343,7 +2343,10 @@ fn parse_vector_paint(
     let fill = match find_attr(attrs, "fill") {
         None => [0, 0, 0, 255],
         Some(attr) => match parse_svg_color(&attr.value, "fill")? {
-            Some(rgb) => with_alpha(rgb, opacity_attr(attrs, "fill-opacity")?),
+            Some(paint) => with_alpha(
+                paint.rgb,
+                paint.alpha * opacity_attr(attrs, "fill-opacity")?,
+            ),
             None => [0, 0, 0, 0],
         },
     };
@@ -2363,7 +2366,7 @@ fn parse_vector_paint(
         None => None,
         Some(attr) => parse_svg_color(&attr.value, "stroke")?,
     };
-    let Some(rgb) = stroke_rgb else {
+    let Some(paint) = stroke_rgb else {
         return Ok((fill, None, fill_rule));
     };
     let cap = match find_attr(attrs, "stroke-linecap") {
@@ -2439,7 +2442,10 @@ fn parse_vector_paint(
             what: "non-finite transformed stroke width".to_owned(),
         });
     }
-    let color = with_alpha(rgb, opacity_attr(attrs, "stroke-opacity")?);
+    let color = with_alpha(
+        paint.rgb,
+        paint.alpha * opacity_attr(attrs, "stroke-opacity")?,
+    );
     if stroke_width == 0.0 || color[3] == 0 {
         return Ok((fill, None, fill_rule));
     }
@@ -2520,13 +2526,98 @@ fn parse_functional_rgb(raw: &str) -> Option<[u8; 3]> {
     Some(rgb)
 }
 
-fn parse_svg_color(raw: &str, key: &str) -> Result<Option<[u8; 3]>, SvgError> {
+#[derive(Clone, Copy)]
+struct ParsedPaint {
+    rgb: [u8; 3],
+    alpha: f32,
+}
+
+/// CSS2 alpha notation: a finite number in 0..1 or a percentage in 0%..100%.
+fn valid_alpha_number(raw: &str) -> bool {
+    let unsigned = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some() || fraction.is_some_and(str::is_empty) {
+        return false;
+    }
+    let digits = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(whole) && digits(fraction.unwrap_or_default()))
+        && (!whole.is_empty() || fraction.is_some_and(|part| !part.is_empty()))
+}
+
+fn parse_alpha_component(raw: &str) -> Option<f32> {
+    let raw = trim_css_whitespace(raw);
+    let percentage = raw.ends_with('%');
+    let number = if percentage {
+        raw.strip_suffix('%')?
+    } else {
+        raw
+    };
+    if !valid_alpha_number(number) {
+        return None;
+    }
+    let value = number.parse::<f64>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    Some(if percentage {
+        (value.clamp(0.0, 100.0) / 100.0) as f32
+    } else {
+        value.clamp(0.0, 1.0) as f32
+    })
+}
+
+/// CSS2 `rgba(r,g,b,a)`: the same RGB components as `rgb()`, plus alpha.
+fn parse_functional_rgba(raw: &str) -> Option<([u8; 3], f32)> {
+    if raw.len() < 6 || !raw.as_bytes()[..5].eq_ignore_ascii_case(b"rgba(") || !raw.ends_with(')') {
+        return None;
+    }
+    let body = raw.get(5..raw.len() - 1)?;
+    let components: Vec<&str> = body.split(',').collect();
+    if components.len() != 4 {
+        return None;
+    }
+    let percentage = trim_css_whitespace(components.first()?).ends_with('%');
+    let mut rgb = [0u8; 3];
+    for (component, slot) in components[..3].iter().zip(&mut rgb) {
+        let component = trim_css_whitespace(component);
+        if component.ends_with('%') != percentage {
+            return None;
+        }
+        let number = if percentage {
+            component.strip_suffix('%')?
+        } else {
+            component
+        };
+        if !valid_rgb_number(number, percentage) {
+            return None;
+        }
+        let value = number.parse::<f64>().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        *slot = if percentage {
+            (value.clamp(0.0, 100.0) * 255.0 / 100.0).round() as u8
+        } else {
+            value.clamp(0.0, 255.0) as u8
+        };
+    }
+    let alpha = parse_alpha_component(components[3])?;
+    Some((rgb, alpha))
+}
+
+fn parse_svg_color(raw: &str, key: &str) -> Result<Option<ParsedPaint>, SvgError> {
     let raw = raw.trim();
     if raw == "none" {
         return Ok(None);
     }
     let Some(hex) = raw.strip_prefix('#') else {
+        if let Some((rgb, alpha)) = parse_functional_rgba(raw) {
+            return Ok(Some(ParsedPaint { rgb, alpha }));
+        }
         return parse_functional_rgb(raw)
+            .map(|rgb| ParsedPaint { rgb, alpha: 1.0 })
             .map(Some)
             .ok_or_else(|| SvgError::Unsupported {
                 what: format!("{key} paint {raw}"),
@@ -2570,7 +2661,7 @@ fn parse_svg_color(raw: &str, key: &str) -> Result<Option<[u8; 3]>, SvgError> {
             });
         }
     };
-    Ok(Some(rgb))
+    Ok(Some(ParsedPaint { rgb, alpha: 1.0 }))
 }
 
 fn opacity_attr(attrs: &[Attr], key: &str) -> Result<f32, SvgError> {

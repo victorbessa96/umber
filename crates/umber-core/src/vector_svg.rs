@@ -2165,6 +2165,74 @@ mod tests {
     }
 
     #[test]
+    fn rgba_accepts_css2_forms_and_composes_opacity() {
+        for (paint, expected) in [
+            ("rgba(255,0,128,0.5)", [255, 0, 128, 128]),
+            (" RGBA( +255 , -10 , 300 , 1 ) ", [255, 0, 255, 255]),
+            ("rgba(0%,50%,100%,25%)", [0, 128, 255, 64]),
+            ("rgba(-10%,110%,25%,125%)", [0, 255, 64, 255]),
+            ("rgba(.5%,1.5%,2.5%,.5)", [1, 4, 6, 128]),
+            ("rgba(000,001,002,0.0)", [0, 1, 2, 0]),
+        ] {
+            let shape = import_functional_fill(paint).expect("accepted CSS2 rgba paint");
+            assert_eq!(shape.fill, expected, "{paint}");
+        }
+
+        let svg = br##"<svg width="1" height="1" style="fill:rgba(1,2,3,0.5); stroke:rgba(10%,20%,30%,50%)" stroke-opacity="0.5" stroke-width="1"><path style="fill:rgba(7,8,9,0.5); fill-opacity:0.5; stroke: RGBA(300, -10, 128, 0.5)" d="M0 0 L1 0 L1 1 Z"/></svg>"##;
+        let params = import_svg(svg).expect("rgba fill and stroke");
+        assert_eq!(params.shape.fill, [7, 8, 9, 64]);
+        assert_eq!(
+            params.shape.stroke.expect("rgba stroke").color,
+            [255, 0, 128, 64]
+        );
+        let exported = export_svg(&params.shape).expect("canonical rgba export");
+        assert!(exported.contains("fill=\"#070809\""), "{exported}");
+        assert!(exported.contains("stroke=\"#FF0080\""), "{exported}");
+        assert!(!exported.contains("rgba("), "{exported}");
+        let imported = import_svg(exported.as_bytes()).expect("canonical rgba import");
+        assert_eq!(
+            export_svg(&imported.shape).expect("canonical rgba re-export"),
+            exported
+        );
+    }
+
+    #[test]
+    fn rgba_rejects_malformed_alpha_and_component_forms() {
+        for paint in [
+            "rgba()",
+            "rgba(1,2,3)",
+            "rgba(1,2,3,4,5)",
+            "rgba(1,,3,0.5)",
+            "rgba(1,2,3,)",
+            "rgba(1 2 3 / 0.5)",
+            "rgba(1.0,2,3,0.5)",
+            "rgba(1%,2,3%,0.5)",
+            "rgba(1e2,0,0,0.5)",
+            "rgba(NaN,0,0,0.5)",
+            "rgba(1,2,3,NaN)",
+            "rgba(1,2,3,1e-1)",
+            "rgba(1,2,3,50.%)",
+            "rgba(1,2,3,.%)",
+            "rgba(+,2,3,0.5)",
+            "rgba(-,2,3,0.5)",
+            "rgba(1,2,3) junk",
+            "rgba (1,2,3,0.5)",
+            "rgba(1,2,3,0.5))",
+            "rgba(1,2,3,0.5",
+            &format!("rgba({},0,0,0.5)", "9".repeat(400)),
+            &format!("rgba({}%,0%,0%,50%)", "9".repeat(400)),
+            &format!("rgba(-{},0,0,0.5)", "9".repeat(400)),
+            &format!("rgba(-{}%,0%,0%,50%)", "9".repeat(400)),
+        ] {
+            let error = import_functional_fill(paint).expect_err("invalid rgba must refuse");
+            assert!(
+                matches!(error, crate::svg::SvgError::Unsupported { ref what } if what.contains("fill paint")),
+                "{paint}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn functional_rgb_basic_shapes_use_the_same_paint_entry_point() {
         let svg = br##"<svg width="2" height="2"><rect width="2" height="2" fill="rgb(9,10,11)" stroke="rgb(12,13,14)" stroke-width="1"/></svg>"##;
         let params = import_svg(svg).expect("basic-shape functional RGB");
@@ -2191,7 +2259,6 @@ mod tests {
             "rgb(1e2,0,0)",
             "rgb(NaN,0,0)",
             "rgb(inf,0,0)",
-            "rgba(1,2,3,1)",
             "rgb(1,2,3) junk",
             "rgb (1,2,3)",
             "rgb(1,2,3))",
