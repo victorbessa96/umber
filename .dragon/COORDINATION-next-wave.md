@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** OBJ mesh export is implemented at `8c9be5793f4fe63b8db0b4e8f8900f4bffc1ffa1`, on brief `b8e12d0b20d9` and claim `8383a09b447e`; queue row 599 and report `docs/loop/kill-reports/2026-11-24-umber-obj-export.md`. Deterministic OBJ geometry, bounded names, typed ragged/over-cap/write failures, and real `load`/`load_obj` round-trips through the hostile-output battery are landed. R1 name/coverage and R2 write-path findings fixed, full export 94+7/0, strict export clippy clean, R3 `deleg_6453e892` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. Remaining row-156 scoping and docs reconciliation are next. This status-doc commit releases `razul-obj-export`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** row-156 candidate scoping + docs reconciliation is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-row156-docs`, on committed brief `42121b0a259e` and queue row 600. Base `5db9030431ea0c0ca02ab4c18734caa5edc8bb4c` was clean and origin-equal, with no live sibling or prior lock. Fill six verified PENDING hashes, scope every remaining candidate with a concrete gate, update XI2/SVG/OBJ requirements rows, and retire the stale agent-contract duplicate. Docs-only checks, report, safe-push, and origin verify. No production source changes, second kill, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 
