@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-PerChannel K1 scalar-semantic blend restriction is implemented at `4383e30393b10a84a74dca3dfa5eabad7703334a`, with brief `27c11e66` and claim `96f4a53a`. Normal stays 31, color semantic and the empty layer context stay 28, scalar and unknown non-empty names become 25, only Tint/Saturation/Color are hidden, and Value is retained. Exact picker test 1/1 in both targets, strict app clippy clean, full app 1,260/0. Replacement review `deleg_52c65481` returned SHIP with zero findings after the first reviewer interrupted. Final report/queue hashes and origin verification remain. Bake/Export history `record_context` is next, followed by all-channel material picking, the Assets mesh category, OccluderScope threading coverage, and XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Bake/Export history `record_context` is implemented at `364b082ebc773f37dc1defb7e01e14754a3550b4`, with brief `8ab0264c` and claim `30011e23`. Every completed bake enqueues once and drains independently of the CURRENT worker, successful exports record in the real success arm, and failures/early refusals add no row. Drain-then-restart regression green, real 8x8 export evidence, strict app clippy clean, full app 1,266/0. R1/R2 findings fixed, R3 interrupted, R4 `deleg_bfc2e18a` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. All-channel material picking is next, followed by the Assets mesh category, OccluderScope threading coverage, and XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
