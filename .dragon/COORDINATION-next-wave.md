@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** XI2 hierarchy hotplug re-query is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-xi2-hotplug`, on committed brief `2c1b9ca7aaa8` and queue row 592. Base `5817b6cd8747bf052d7eba4a1b63e5cbd57dbd56` was clean and origin-equal, with no live sibling or prior lock. Select XI_HierarchyChanged, refresh mappings/erasers atomically through XIQueryDevice, preserve known-good state on query failure, and prove swap/preserve/re-swap semantics with deterministic tests. RED acceptance, implementation, full stylus clippy/tests, independent review, report, and one safe-push wave remain. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** XI2 hotplug re-query is implemented at `5d874bfbcce3a00878408e0113c427ee574bb1a7`, on brief `2c1b9ca7aaa8` and claim `1bd4c1efae12`; queue row 593 and report `docs/loop/kill-reports/2026-11-24-umber-xi2-hotplug.md`. `XI_HierarchyChanged` is selected, fresh `XIQueryDevice` results swap atomically on success, failure preserves known-good mappings/erasers, and the notification emits no `SourcedEvent`. Full stylus xi2 23/23, default 7/7, full app 1,277/0, strict stylus clippy clean, review `deleg_b52f29bb` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The bounded vector/SVG slice is next. This status-doc commit releases `razul-xi2-hotplug`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 

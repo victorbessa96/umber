@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-OccluderScope combo→request→resolution kittest is implemented at `69f02313381cbff393d90b3cb3b6b9bf40ee3a9b`, with brief `f9bdd6d4` and claim `c0672657`. The real combo is driven by accessible value into `bake_current`, with request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path. Full app 1,277/0, strict app clippy clean, independent review `deleg_8cba1f3b` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. XI2 hotplug re-query is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+XI2 hotplug re-query is implemented at `5d874bfbcce3a00878408e0113c427ee574bb1a7`, with brief `2c1b9ca7` and claim `1bd4c1ef`. `XI_HierarchyChanged` is selected, fresh `XIQueryDevice` results swap atomically on success, failure preserves known-good mappings/erasers, and the notification emits no `SourcedEvent`. Full stylus xi2 23/23, default 7/7, full app 1,277/0, strict stylus clippy clean, review `deleg_b52f29bb` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The bounded vector/SVG slice is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

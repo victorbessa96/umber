@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Changed — XI2 hotplug re-query:** `5d874bfb` selects `XI_HierarchyChanged`, refreshes `XIQueryDevice` mappings/erasers atomically on success, preserves known-good state on query failure, and emits no `SourcedEvent` for the notification. Full stylus xi2 23/23, default 7/7, full app 1,277/0, review SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-xi2-hotplug.md`.
+
 - **Changed — OccluderScope kittest:** `69f02313` drives the real combo by accessible value into `bake_current`, asserting request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path. Full app 1,277/0, independent review SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-occluder-kittest.md`.
 
 - **Changed — Assets browser mesh category:** `6ef03194` adds lazy all-extension mesh listing with first-wins directories and no eager parsing, `LibraryOutcome.mesh`, `THUMB_KIND_MESH=5`, a sixth default-closed Meshes category with generic glyph, and `mesh_loads` through the exact `load_mesh_path` transaction. R1 empty-cache and coverage findings fixed, full mesh 32/32, full app 1,276/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-assets-mesh.md`.
