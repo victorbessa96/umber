@@ -1321,6 +1321,8 @@ pub struct BakesPanel {
     applied_margin: MarginType,
     applied_skew_threshold_deg: f32,
     applied_occluder_own_set: bool,
+    #[cfg(test)]
+    last_request_scope: Option<(bool, u32, u32)>,
     applied_opacity_source: OpacitySource,
     applied_opacity_strength: f32,
     applied_opacity_invert: bool,
@@ -1496,6 +1498,8 @@ impl BakesPanel {
             applied_margin: MarginType::Extend,
             applied_skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
             applied_occluder_own_set: false,
+            #[cfg(test)]
+            last_request_scope: None,
             applied_opacity_source: OpacitySource::default(),
             applied_opacity_strength: 1.0,
             applied_opacity_invert: false,
@@ -3570,6 +3574,10 @@ impl BakesPanel {
                 )
             }),
         };
+        #[cfg(test)]
+        {
+            self.last_request_scope = Some((request.occluder_own_set, request.size, request.rays));
+        }
         self.start_job(count, skipped, dispatch.skew_skipped.clone(), move || {
             run_bake(request)
         });
@@ -4600,6 +4608,149 @@ mod tests {
             255,
             "the ground alone cannot occlude itself"
         );
+    }
+
+    fn try_request_gpu() -> Option<umber_gpu::GpuContext> {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        if !adapter.features().contains(features) {
+            return None;
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .ok()?;
+        Some(umber_gpu::GpuContext::new(
+            adapter,
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        ))
+    }
+
+    fn wait_for_bake(h: &mut egui_kittest::Harness<'_, BakesPanel>) {
+        for _ in 0..600 {
+            let running = h.state_mut().poll_job();
+            h.run();
+            if !running {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("bake did not finish within the bounded poll window");
+    }
+
+    fn ground_ao_min_lit(panel: &BakesPanel) -> u8 {
+        let record = panel
+            .last_records()
+            .iter()
+            .find(|r| r.set == "Ground" && r.selection == Some(BakeSelection::Ao))
+            .expect("the Ground AO record exists");
+        let (_w, _h, bytes) = umber_export::png::read_png_rgba8(&record.path)
+            .unwrap_or_else(|e| panic!("Ground AO PNG decode: {e}"));
+        bytes
+            .chunks_exact(4)
+            .filter(|px| px[3] > 0)
+            .map(|px| px[0])
+            .min()
+            .expect("covered AO texels exist")
+    }
+
+    #[test]
+    fn occluder_scope_combo_drives_request_and_resolution() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let gpu = try_request_gpu().expect("real GPU adapter required for the occluder kittest");
+        let quad = |z: f32, y0: f32, y1: f32| umber_mesh::MeshData {
+            positions: vec![[-1.0, y0, z], [1.0, y0, z], [1.0, y1, z], [-1.0, y1, z]],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let ground = quad(0.0, 0.0, 2.0);
+        let slab = quad(0.5, 0.0, 1.0);
+        let mesh = umber_mesh::MeshData {
+            positions: [ground.positions.clone(), slab.positions.clone()].concat(),
+            normals: [ground.normals.clone(), slab.normals.clone()].concat(),
+            uvs: [ground.uvs.clone(), slab.uvs.clone()].concat(),
+            indices: [ground.indices.clone(), vec![4, 5, 6, 4, 6, 7]].concat(),
+            material_names: vec!["Ground".into(), "Slab".into()],
+            triangle_materials: vec![0, 0, 1, 1],
+        };
+        let mut panel = BakesPanel::new(
+            std::env::temp_dir().join(format!("umber-occluder-kittest-{}", std::process::id())),
+        );
+        assert!(panel.set_resolution(DEFAULT_RESOLUTION));
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, p: &mut BakesPanel| {
+                p.show(
+                    ui,
+                    BakesContext {
+                        gpu: Some(&gpu),
+                        mesh: Some(&mesh),
+                        mesh_path: None,
+                    },
+                );
+            },
+            panel,
+        );
+        h.run();
+        assert!(h.state_mut().set_set_enabled("Slab", false));
+
+        // Whole mesh is the default. Select Baked set only through the
+        // actual combo, then bake through the real worker and poll path.
+        h.get_by_value(&tr("bakes.occluder-whole")).click();
+        h.run();
+        h.get_by_label(&tr("bakes.occluder-own")).click();
+        h.run();
+        assert!(h.state().occluder_own_set);
+        h.state_mut()
+            .bake_current(&gpu.device, &gpu.queue, &mesh, None)
+            .expect("OwnSet bake starts");
+        wait_for_bake(&mut h);
+        assert_eq!(h.state().completed_jobs(), 1);
+        assert!(!h.state().last_job_failed());
+        assert_eq!(
+            ground_ao_min_lit(h.state()),
+            255,
+            "OwnSet excludes the slab"
+        );
+        assert_eq!(
+            h.state().last_request_scope,
+            Some((true, DEFAULT_RESOLUTION, DEFAULT_RAYS)),
+            "the combo reaches the actual BakeRequest"
+        );
+
+        // Whole mesh restores the other branch: the slab now darkens the
+        // Ground AO. The second job uses the same real worker and PNG path.
+        h.get_by_value(&tr("bakes.occluder-own")).click();
+        h.run();
+        h.get_by_label(&tr("bakes.occluder-whole")).click();
+        h.run();
+        assert!(!h.state().occluder_own_set);
+        h.state_mut()
+            .bake_current(&gpu.device, &gpu.queue, &mesh, None)
+            .expect("WholeMesh bake starts");
+        wait_for_bake(&mut h);
+        assert_eq!(h.state().completed_jobs(), 2);
+        assert!(!h.state().last_job_failed());
+        assert!(
+            ground_ao_min_lit(h.state()) < 255,
+            "WholeMesh includes the slab and darkens Ground AO"
+        );
+        assert_eq!(
+            h.state().last_request_scope,
+            Some((false, DEFAULT_RESOLUTION, DEFAULT_RAYS)),
+            "WholeMesh reaches the actual BakeRequest too"
+        );
+        let _ = std::fs::remove_dir_all(h.state().output_dir());
     }
 
     use super::*;
