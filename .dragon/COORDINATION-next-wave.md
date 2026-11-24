@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** control channel + bridge live smoke is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-control-smoke`, on committed brief `5961e6d8eef3` and queue row 596. Base `75b4e50d74492fd4cb2c68afe9ce3b6a4179eb54` was clean and origin-equal, with no live sibling or prior lock. Build current umber/umber-cli, prove wrong-token unauthorized+EOF, authed ping/methods/ui.inspect/PNG, and bridge initialize relay, then fill check 5 Result, docs-only safe-push, and origin verify. No app source changes, second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** control channel + bridge live smoke is COMPLETE, on brief `5961e6d8eef3` and claim `fcd0f12d51bb`; queue row 597 and report `docs/loop/kill-reports/2026-11-24-umber-control-smoke.md`. Current debug build passed wrong-token unauthorized+EOF, authed `ping`/11 methods/`ui.inspect` with panels/layers/tool, a decoded 1296×729 PNG with 3,056 colors and matching dimensions, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. App cleanup and scratch removal verified; no app source changed. Final report/queue hashes and origin verification remain. Row-156 idea-backlog verification is next. This status-doc commit releases `razul-control-smoke`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 

@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-Bounded SVG `rgba()` is implemented at `8baf5e2d4109dfc21d5b181ca5d48214f2de7543`, with brief `80c6b8f9` and claim `507443e0`. CSS2 integer/percentage RGB plus finite `0..1` or `0%..100%` alpha, multiplicative fill/stroke opacity, canonical hex+opacity export, and typed malformed/overflow refusals are landed. R1 overflow finding fixed, exact rgba 2/2, full core 358/0, strict core clippy clean, R2 `deleg_feabc962` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The control-channel smoke tail is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Control channel + bridge live smoke is complete. Check 5 records wrong-token unauthorized+EOF, authed control methods and UI inspection, a decoded 1296×729 PNG with 3,056 colors and matching dimensions, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. App cleanup and scratch removal verified; no app source changed. Final report/queue hashes and origin verification remain. Row-156 idea-backlog verification is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

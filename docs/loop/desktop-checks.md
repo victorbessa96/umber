@@ -114,7 +114,15 @@ Headless half is unit-tested in `control.rs`; this is the live desktop pass.
 4. Bridge on 8378: `auth` ok, then one MCP `initialize` JSON-RPC line; expect
    the spawned `umber-cli mcp` child's `initialize` result relayed verbatim.
 
-Result: ____________________
+Result: PASS 2026-11-24 (Razul, current debug build): wrong token returned
+`{"id":1,"ok":false,"error":"unauthorized"}` and then EOF. Authed control
+returned `ping`, 11 methods, and `ui.inspect` with `panels`/`layers`/`tool`.
+`viewport.screenshot` decoded as a 1296×729 PNG with 3,056 distinct colors;
+IHDR matched the reply dimensions. Bridge `initialize` returned protocol
+`2025-06-18` and `serverInfo` `umber-cli 0.1.0`; its raw reply line matched a
+direct `umber-cli mcp` child byte-for-byte. Scratch config/state/cache/TMPDIR
+was removed and the app exited on SIGTERM (`rc=-15`). No token values were
+logged. Checks 1–4 remain owed on Bessa's desktop.
 
 ## Verification of this document
 

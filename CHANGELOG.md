@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Verified — control channel + bridge live smoke:** check 5 now records wrong-token unauthorized+EOF, authed control methods and UI inspection, a decoded 1296×729 PNG with 3,056 colors, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. Checks 1–4 remain desktop-owed. Report: `docs/loop/kill-reports/2026-11-24-umber-control-smoke.md`.
+
 - **Changed — bounded SVG `rgba()` paint:** `8baf5e2d` parses CSS2 `rgba()` with integer/percentage RGB and finite alpha, composes multiplicatively with fill/stroke opacity, and keeps canonical hex+opacity export. R1 overflow finding fixed, exact rgba 2/2, full core 358/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-svg-rgba.md`.
 
 - **Changed — XI2 hotplug re-query:** `5d874bfb` selects `XI_HierarchyChanged`, refreshes `XIQueryDevice` mappings/erasers atomically on success, preserves known-good state on query failure, and emits no `SourcedEvent` for the notification. Full stylus xi2 23/23, default 7/7, full app 1,277/0, review SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-xi2-hotplug.md`.
