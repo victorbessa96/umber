@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-L7 stock `color_button` delegation is implemented at `eb2237a917e6697f990ffe8cb1da09e57f517029`, with brief `12471890` and claim `b391649b`. The exact focused stock command is 2/2, strict `umber-gui` clippy is clean, and the full crate is 151/151. R1's test-filter finding is fixed and R2 `deleg_2c79a7b1` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. PerChannel scalar-mode K1 is the next independent kill, followed by Bake/Export history context, all-channel material picking, the Assets mesh category, OccluderScope threading coverage, and XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+PerChannel K1 scalar-semantic blend restriction is implemented at `4383e30393b10a84a74dca3dfa5eabad7703334a`, with brief `27c11e66` and claim `96f4a53a`. Normal stays 31, color semantic and the empty layer context stay 28, scalar and unknown non-empty names become 25, only Tint/Saturation/Color are hidden, and Value is retained. Exact picker test 1/1 in both targets, strict app clippy clean, full app 1,260/0. Replacement review `deleg_52c65481` returned SHIP with zero findings after the first reviewer interrupted. Final report/queue hashes and origin verification remain. Bake/Export history `record_context` is next, followed by all-channel material picking, the Assets mesh category, OccluderScope threading coverage, and XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

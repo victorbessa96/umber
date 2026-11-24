@@ -1,10 +1,6 @@
 # Per-channel blend-mode restriction — the design fork (2026-10-22)
 
-Status: research/design kill (docs-only, battery-exempt). The code kill it
-stages is BLOCKED behind the fleet closes + a sanctioned battery (the
-2026-10-22 envelope forbids cargo build/test). Seed: the 10-21
-deep-context design seed (task-progress `umber`) + the STATE block's
-open-lanes row.
+Status: K1 implemented at `4383e30393b10a84a74dca3dfa5eabad7703334a`, with the full app battery green and replacement review SHIP. The original research/design kill was docs-only. Seed: the 10-21 deep-context design seed (task-progress `umber`) + the STATE block's open-lanes row.
 
 ## The question
 
@@ -111,7 +107,7 @@ as-is.
 − A second enforcement site beside the driver gate — accepted: the
   picker is the UX contract; the driver stays permissive (see non-goals).
 
-## The staged code kill (BLOCKED on the battery — the plan)
+## K1 implementation (LANDED locally at `4383e303`)
 
 **K1 (one kill, one file surface)** — `layers_panel.rs`:
 `channel_is_color_semantic(name) -> bool` beside the picker; the filter
@@ -126,6 +122,8 @@ the affordance.
 full battery (minimum scope umber-app + umber-core) when cargo is
 re-sanctioned; cross-review by the other claw; rides a WAVE push —
 never a per-kill push.
+
+**Landing receipt:** `4383e30393b10a84a74dca3dfa5eabad7703334a` implements the one-file picker change and matrix. RED roughness 28→25 was reproduced, then the exact test passed 1/1 in both targets. Strict app clippy is clean; full app with the documented repo asset-root override is 1,260/0 across 11 suites. First reviewer `deleg_14d8487c` interrupted without a verdict; replacement `deleg_52c65481` returned SHIP with zero findings. The empty layer-compositing context explicitly preserves its existing list and folder Passthrough. Safe-push and origin verification remain at this writing.
 
 ## Non-goals (named so they are not rediscovered as surprises)
 

@@ -4,6 +4,11 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
+
+- **Changed — L7 stock picker delegation:** `eb2237a9` makes the stock `color_button` a thin delegate to `color_button_with` with default English labels and per-call empty recents, deleting the duplicate popup body while preserving stock behavior. Focused 2/2, full `umber-gui` 151/151, R2 SHIP; status `f8cde643`.
+- **Changed — PerChannel K1 scalar-semantic blend restriction:** `4383e303` hides only Tint/Saturation/Color on scalar-semantic channels and keeps Value. Normal remains 31, color-semantic channels and the empty layer-compositing context remain 28, scalar and unknown non-empty names become 25. Saved-document and driver behavior are unchanged. RED 28→25 reproduced, exact test 1/1 in both targets, full app 1,260/0, replacement review SHIP. Report: `docs/loop/kill-reports/2026-11-23-umber-perchannel-k1.md`.
+
 ## The November waves — W1 correctness, the R-A2 close, the ABR tail, the SVG import (2026-10-24 → 2026-11-10)
 
 - **Fixed — W1, the primitive conditioning rule:** `UvTri` now rejects a
