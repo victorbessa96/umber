@@ -1348,6 +1348,10 @@ pub struct BakesPanel {
     /// normal read it), so `job.status` needs this to avoid reporting that
     /// older bake's files as the failed job's outputs.
     last_failed: bool,
+    /// Completed job outcomes awaiting the shell's history drain. This is
+    /// independent of the CURRENT worker, so a new bake cannot erase the
+    /// previous job's landing before the shell sees it.
+    job_history: Vec<bool>,
     /// Which present tiles a Bake covers (default: all present).
     tiles: TileSelection,
     /// The loaded mesh's present tiles, cached across frames.
@@ -1510,6 +1514,7 @@ impl BakesPanel {
             status: tr("bakes.no-bake-yet"),
             last_records: Vec::new(),
             last_failed: false,
+            job_history: Vec::new(),
             tiles: TileSelection::new(),
             mesh_tiles: MeshTilesCache::default(),
             job: None,
@@ -2508,6 +2513,7 @@ impl BakesPanel {
             .map(|job| (job.skipped, job.skipped_skew))
             .unwrap_or_default();
         self.apply_outcome(outcome, &skipped, &skipped_skew);
+        self.job_history.push(self.last_failed);
         self.completed_jobs += 1;
         false
     }
@@ -2538,6 +2544,12 @@ impl BakesPanel {
     /// [`Self::last_records`] still holds the last successful bake's).
     pub fn last_job_failed(&self) -> bool {
         self.last_failed
+    }
+
+    /// Takes every completed job's failure flag, oldest first. Each landing
+    /// appears once even if another bake started before the shell drained it.
+    pub fn take_job_history(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.job_history)
     }
 
     /// Draws the panel: the settings / maps / sets [`umber_gui::ParamGroup`]
@@ -5014,6 +5026,41 @@ mod tests {
         assert_eq!(p.last_records()[0].path.file_name().unwrap(), "first.png");
         // Done: the button re-enables.
         assert!(p.can_bake(true, true));
+    }
+
+    #[test]
+    fn completed_job_history_survives_a_restart_before_the_shell_drains() {
+        let mut p = panel();
+        let (first_release, first) = gated(Ok(vec![record("first.png", 1)]));
+        assert!(p.start_job(1, Vec::new(), Vec::new(), first));
+        first_release.send(()).expect("first worker is waiting");
+        await_job(&mut p);
+        assert!(!p.is_baking(), "the first job landed");
+
+        // Start the next job BEFORE the shell takes the old landing. The
+        // old row must survive even though the current worker is in flight.
+        let (second_release, second) = gated(Ok(vec![record("second.png", 2)]));
+        assert!(p.start_job(1, Vec::new(), Vec::new(), second));
+        assert!(p.is_baking(), "the second job is in flight");
+        assert_eq!(p.take_job_history(), vec![false]);
+        assert!(
+            p.take_job_history().is_empty(),
+            "the first landing drains once"
+        );
+
+        second_release.send(()).expect("second worker is waiting");
+        await_job(&mut p);
+        assert_eq!(p.take_job_history(), vec![false]);
+
+        let (third_release, third) = gated(Err(anyhow::anyhow!("third failed")));
+        assert!(p.start_job(1, Vec::new(), Vec::new(), third));
+        third_release.send(()).expect("third worker is waiting");
+        await_job(&mut p);
+        assert_eq!(p.take_job_history(), vec![true]);
+        assert!(
+            p.take_job_history().is_empty(),
+            "the failure also drains once"
+        );
     }
 
     #[test]

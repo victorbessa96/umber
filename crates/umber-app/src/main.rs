@@ -1661,7 +1661,7 @@ impl TabViewer for PanelViewer<'_> {
                     // reads the live target for the painted bridge while
                     // the center views keep staging strokes into it.
                     paint: self.paint.as_deref(),
-                    doc: Some(&*self.doc),
+                    doc: Some(&mut *self.doc),
                     graph: Some(&*self.graph),
                     baked_normal: self.bakes.baked_normal(),
                 };
@@ -1679,11 +1679,11 @@ impl TabViewer for PanelViewer<'_> {
                         mesh: self.mesh,
                         mesh_path: self.mesh_path,
                         paint: self.paint.as_deref(),
-                        doc: Some(&*self.doc),
+                        doc: Some(&mut *self.doc),
                         graph: Some(&*self.graph),
                         baked_normal: self.bakes.baked_normal(),
                     };
-                    self.export.run_requested_export(&ctx);
+                    self.export.run_requested_export(ctx);
                 }
             }
             Panel::Graph => {
@@ -5256,13 +5256,25 @@ impl eframe::App for UmberApp {
                 });
             self.about_open = open && !close;
         }
-        if self.state.bakes.poll_job() {
+        let was_baking = self.state.prev_baking;
+        let still_baking = self.state.bakes.poll_job();
+        // Every landed outcome is queued at the drain itself, so a new bake
+        // starting before this shell poll cannot erase the old job's row.
+        for failed in self.state.bakes.take_job_history() {
+            history_panel::record_job_result(
+                &mut self.state.doc,
+                history_panel::HistoryKind::Bake,
+                failed,
+            );
+        }
+        if still_baking {
             self.state.prev_baking = true;
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if self.state.prev_baking {
-            // A bake just completed. Check if it was a high-poly bake with auto-cage.
+        if history_panel::job_completed(was_baking, still_baking) {
+            self.state.prev_baking = false;
+            // Check if it was a high-poly bake with auto-cage.
             if let Some(cage) = self.state.bakes.last_cage() {
                 if let Some(mesh) = self.state.mesh.as_ref() {
                     self.state

@@ -318,11 +318,11 @@ fn run_export(app: &mut UmberApp) -> Result<(), &'static str> {
         mesh: app.state.mesh.as_ref(),
         mesh_path: app.state.mesh_path.as_deref(),
         paint: app.state.paint.as_ref(),
-        doc: Some(&app.state.doc),
+        doc: Some(&mut app.state.doc),
         graph: Some(&app.state.graph),
         baked_normal: app.state.bakes.baked_normal(),
     };
-    app.state.export.export_current(&ctx)
+    app.state.export.export_current(ctx)
 }
 
 /// Typed failure for dispatch-by-id (queue row 154, wave 2a): the agent/MCP

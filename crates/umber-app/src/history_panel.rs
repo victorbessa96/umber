@@ -638,6 +638,21 @@ impl SessionHistory {
     }
 }
 
+/// Whether a job landed between this frame's before/after poll states.
+/// Running and newly-started jobs are not completions; an idle frame after
+/// the landing is not a second completion.
+pub fn job_completed(was_in_flight: bool, still_in_flight: bool) -> bool {
+    was_in_flight && !still_in_flight
+}
+
+/// Records one finished job's outcome. Successful bakes and exports are
+/// context-only rows; failures and early refusals add no history entry.
+pub fn record_job_result(doc: &mut Document, kind: HistoryKind, failed: bool) {
+    if !failed {
+        doc.record_session_event(kind);
+    }
+}
+
 /// Whether `entry` is the live row: a layer row at the live layer depth, a
 /// stroke row at the live stroke depth, a graph row at the live graph depth
 /// (`None` — no journal to drive — is never current), context rows never.
@@ -1880,6 +1895,45 @@ mod tests {
         assert_eq!(entries[0].jump_target(), Some(1));
         assert_eq!(entries[1].jump_target(), None);
         assert_eq!(entries[2].jump_target(), Some(2));
+    }
+
+    #[test]
+    fn job_completion_fires_only_on_the_landing_edge() {
+        assert!(!job_completed(false, false), "idle is not completion");
+        assert!(!job_completed(false, true), "starting is not completion");
+        assert!(!job_completed(true, true), "running is not completion");
+        assert!(job_completed(true, false), "landing fires once");
+        let mut doc = Document::default();
+        record_job_result(&mut doc, HistoryKind::Bake, true);
+        assert!(
+            doc.session_history.is_empty(),
+            "a failed landing records nothing"
+        );
+        record_job_result(&mut doc, HistoryKind::Bake, false);
+        assert_eq!(doc.session_history.len(), 1, "the landing records once");
+        assert!(
+            !job_completed(false, false),
+            "the next idle frame adds no edge"
+        );
+    }
+
+    #[test]
+    fn job_results_record_only_successful_jobs() {
+        let mut doc = Document::default();
+        record_job_result(&mut doc, HistoryKind::Bake, true);
+        record_job_result(&mut doc, HistoryKind::Export, true);
+        assert!(doc.session_history.is_empty(), "failed jobs record nothing");
+        record_job_result(&mut doc, HistoryKind::Bake, false);
+        record_job_result(&mut doc, HistoryKind::Export, false);
+        let entries = doc.session_history.entries();
+        assert_eq!(entries.len(), 2, "each success records exactly one row");
+        assert_eq!(entries[0].kind, HistoryKind::Bake);
+        assert_eq!(entries[1].kind, HistoryKind::Export);
+        for entry in entries {
+            assert_eq!(entry.jump_target(), None);
+            assert_eq!(entry.stroke_target(), None);
+            assert_eq!(entry.graph_target(), None);
+        }
     }
 
     #[test]

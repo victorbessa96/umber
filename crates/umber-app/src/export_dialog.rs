@@ -217,9 +217,9 @@ pub struct ExportContext<'a> {
     /// The live paint session (`None` = no paint target: Base Color
     /// exports the flat placeholder — see the dialog's source badge).
     pub paint: Option<&'a PaintState>,
-    /// The open document (for the `$layerName` token; `None` behaves
-    /// like an empty document).
-    pub doc: Option<&'a Document>,
+    /// The open document (for the `$layerName` token and the completed
+    /// export's context row; `None` behaves like an empty document).
+    pub doc: Option<&'a mut Document>,
     /// The graph panel (for the procedural Base Color bridge; `None`
     /// or no evaluated output behaves like no graph — see the badge).
     pub graph: Option<&'a GraphPanel>,
@@ -616,7 +616,7 @@ impl ExportDialog {
     /// — [`Self::prepare_export`], then the same [`Self::export_now`] the
     /// button calls (synchronous: the outcome is in `status` /
     /// `last_written` when this returns).
-    pub fn export_current(&mut self, ctx: &ExportContext<'_>) -> Result<(), &'static str> {
+    pub fn export_current(&mut self, ctx: ExportContext<'_>) -> Result<(), &'static str> {
         self.prepare_export(ctx.mesh, ctx.paint)?;
         if ctx.gpu.is_none() {
             return Err("export.no-gpu");
@@ -764,7 +764,7 @@ impl ExportDialog {
 
     /// Runs a button-requested export through [`Self::export_current`]; a
     /// refusal lands on the status line as the greyed button's reason.
-    pub fn run_requested_export(&mut self, ctx: &ExportContext<'_>) {
+    pub fn run_requested_export(&mut self, ctx: ExportContext<'_>) {
         if let Err(key) = self.export_current(ctx) {
             self.status = tr(key);
         }
@@ -773,8 +773,8 @@ impl ExportDialog {
     /// Runs the export synchronously and records the outcome in
     /// `status`/`last_written`/`last_skipped` (never propagates: the
     /// panel reports failures as a status line, not a crash).
-    fn export_now(&mut self, ctx: &ExportContext<'_>) {
-        match self.run(ctx) {
+    fn export_now(&mut self, mut ctx: ExportContext<'_>) {
+        match self.run(&ctx) {
             Ok(outcome) => {
                 let names: Vec<String> = outcome
                     .written
@@ -830,6 +830,13 @@ impl ExportDialog {
                 self.last_written = outcome.written;
                 self.last_skipped = outcome.skipped;
                 self.last_export_failed = false;
+                if let Some(doc) = ctx.doc.as_deref_mut() {
+                    crate::history_panel::record_job_result(
+                        doc,
+                        crate::history_panel::HistoryKind::Export,
+                        false,
+                    );
+                }
             }
             Err(err) => {
                 log::error!("export failed: {err:#}");
@@ -858,7 +865,7 @@ impl ExportDialog {
         let (device, queue) = (&gpu.device, &gpu.queue);
         let mesh_path = ctx.mesh_path;
         let paint = ctx.paint;
-        let doc = ctx.doc;
+        let doc = ctx.doc.as_deref();
         let graph = ctx.graph;
         let fallback = PathBuf::from(bakes_panel::FALLBACK_TEXTURE_SET);
         let texture_set = umber_mesh::texture_set_name(mesh_path.unwrap_or(&fallback), mesh);
@@ -1181,7 +1188,7 @@ mod tests {
             baked_normal: None,
         };
         // No GPU: refused before the driver runs, nothing counted.
-        assert_eq!(d.export_current(&ctx), Err("export.no-gpu"));
+        assert_eq!(d.export_current(ctx), Err("export.no-gpu"));
         assert_eq!(d.completed_exports(), 0);
     }
 
@@ -1203,7 +1210,7 @@ mod tests {
             graph: None,
             baked_normal: None,
         };
-        d.run_requested_export(&ctx);
+        d.run_requested_export(ctx);
         assert_eq!(d.completed_exports(), 0);
         assert!(!d.status.is_empty());
     }
@@ -1224,7 +1231,7 @@ mod tests {
             baked_normal: None,
         };
         // The driver bails (no mesh, no GPU): the Err arm runs.
-        d.export_now(&ctx);
+        d.export_now(ctx);
         assert!(
             d.last_written.is_empty(),
             "stale files after a failed export"
@@ -1234,6 +1241,115 @@ mod tests {
             d.last_export_failed(),
             "the Err arm flags the failure for job.status export.failed"
         );
+    }
+
+    #[test]
+    fn export_history_records_only_successful_exports() {
+        let mut doc = Document::default();
+        let mut d = dialog();
+        d.size = 8;
+        let out = std::env::temp_dir().join(format!("umber-export-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        d.set_output_dir(out.clone());
+        let quad = umber_mesh::MeshData {
+            positions: vec![[0.0; 3]; 4],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("real 8x8 export acceptance requires a wgpu adapter");
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        assert!(
+            adapter.features().contains(features),
+            "real 8x8 export acceptance requires TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES"
+        );
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .expect("device");
+        let gpu = umber_gpu::GpuContext::new(
+            adapter,
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        );
+        d.export_now(ExportContext {
+            gpu: Some(&gpu),
+            mesh: Some(&quad),
+            mesh_path: None,
+            paint: None,
+            doc: Some(&mut doc),
+            graph: None,
+            baked_normal: None,
+        });
+        assert!(!d.last_export_failed());
+        assert_eq!(d.completed_exports(), 1);
+        assert!(
+            !d.last_written().is_empty(),
+            "a successful export writes real files"
+        );
+        for path in d.last_written() {
+            assert!(path.is_file(), "missing output: {}", path.display());
+            let (width, height, _) = umber_export::png::read_png_rgba8(path)
+                .unwrap_or_else(|err| panic!("decode {}: {err}", path.display()));
+            assert_eq!((width, height), (8, 8), "8x8 output: {}", path.display());
+        }
+        assert_eq!(
+            doc.session_history.len(),
+            1,
+            "the first success records one row"
+        );
+        d.export_now(ExportContext {
+            gpu: Some(&gpu),
+            mesh: Some(&quad),
+            mesh_path: None,
+            paint: None,
+            doc: Some(&mut doc),
+            graph: None,
+            baked_normal: None,
+        });
+        assert_eq!(d.completed_exports(), 2);
+        assert_eq!(
+            doc.session_history.len(),
+            2,
+            "the second success adds exactly one more"
+        );
+
+        d.export_now(ExportContext {
+            gpu: None,
+            mesh: Some(&quad),
+            mesh_path: None,
+            paint: None,
+            doc: Some(&mut doc),
+            graph: None,
+            baked_normal: None,
+        });
+        assert!(d.last_export_failed());
+        assert_eq!(d.completed_exports(), 3);
+        assert_eq!(doc.session_history.len(), 2, "a failed run adds no row");
+        assert_eq!(
+            d.export_current(ExportContext {
+                gpu: None,
+                mesh: Some(&quad),
+                mesh_path: None,
+                paint: None,
+                doc: Some(&mut doc),
+                graph: None,
+                baked_normal: None,
+            }),
+            Err("export.no-gpu"),
+            "an early refusal never reaches the driver"
+        );
+        assert_eq!(d.completed_exports(), 3);
+        assert_eq!(doc.session_history.len(), 2, "early refusal adds no row");
+        let _ = std::fs::remove_dir_all(out);
     }
 
     #[test]
