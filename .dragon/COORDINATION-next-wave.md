@@ -2,7 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** row-156 scoping and docs reconciliation is COMPLETE, on brief `42121b0a259e` and claim `664d5e425587`; queue row 601 and report `docs/loop/kill-reports/2026-11-24-row156-scoping.md`. `docs/research/2026-11-24-row156-scoping.md` records OBJ landed and a concrete gate for every remaining candidate. Six verified requirement hashes are filled; XI2/SVG/OBJ rows are current; the stale agent-contract duplicate is retired. Final report/queue hashes and origin verification remain. GLB export is the next named code follow-up. This status-doc commit releases `razul-row156-docs`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** GLB mesh export round-trip is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-glb-export`, on committed brief `d3817e4c6f25` and queue row 602. Base `9dcacafa080176b77a90c2fc223a6d2544cc106e` was clean and origin-equal, with no live sibling or prior lock. Deterministic GLB 2.0 container, typed ragged/over-cap/write failures, real write→load/load_gltf round-trip, hostile-output battery extension, independent review, report, and one safe-push wave. No material/texture, release, centralhost, or public-PR scope.
+
 
 ## Historical coordination snapshots (append-only; not current status)
 
