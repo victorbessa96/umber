@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Changed — OccluderScope kittest:** `69f02313` drives the real combo by accessible value into `bake_current`, asserting request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path. Full app 1,277/0, independent review SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-occluder-kittest.md`.
+
 - **Changed — Assets browser mesh category:** `6ef03194` adds lazy all-extension mesh listing with first-wins directories and no eager parsing, `LibraryOutcome.mesh`, `THUMB_KIND_MESH=5`, a sixth default-closed Meshes category with generic glyph, and `mesh_loads` through the exact `load_mesh_path` transaction. R1 empty-cache and coverage findings fixed, full mesh 32/32, full app 1,276/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-assets-mesh.md`.
 
 - **Changed — all-channel material picker:** `663632c0` adds a session-only UV-footer `All channels` mode with materialized-only `planes_present()` enumeration, per-channel sampling and straight-alpha conversion, one grouped N-fill creation, selection mirroring, and failure-atomic preflight. Active-channel v1 is preserved, and Ctrl+Alt is exclusive before every capture handle. R1 findings fixed, full picker 5/5, full app 1,271/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-material-picker-all-channels.md`.

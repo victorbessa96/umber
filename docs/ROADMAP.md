@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-Assets browser mesh category is implemented at `6ef031944f8b3333d4bc50c440c9c96739209973`, with brief `9935d582` and claim `752c32ab`. Lazy all-extension listing uses first-wins dirs and no eager parsing; `LibraryOutcome.mesh`, `THUMB_KIND_MESH=5`, a sixth default-closed category with generic glyph, and `mesh_loads` through the exact `load_mesh_path` transaction are wired. R1 empty-cache and coverage findings fixed, full mesh 32/32, strict app clippy clean, full app 1,276/0, R2 `deleg_86d758c2` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. OccluderScope combo→request→resolution kittest is next, followed by XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+OccluderScope combo→request→resolution kittest is implemented at `69f02313381cbff393d90b3cb3b6b9bf40ee3a9b`, with brief `f9bdd6d4` and claim `c0672657`. The real combo is driven by accessible value into `bake_current`, with request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path. Full app 1,277/0, strict app clippy clean, independent review `deleg_8cba1f3b` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. XI2 hotplug re-query is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
