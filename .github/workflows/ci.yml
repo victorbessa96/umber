@@ -45,6 +45,10 @@ jobs:
       # fails when a commit changes the counts without regenerating.
       - name: Scorecard current
         run: python3 scripts/scorecard.py --check
+      # docs/parity.md is generated from docs/specs/requirements.md;
+      # fails when the capability table drifts without regeneration.
+      - name: Parity current
+        run: python3 scripts/parity.py --check
 
   # Docs-only PRs skip the build matrix (absorbed 2026-10-14 from
   # photocraft's ci.yml `platforms` job, made conservative): the matrix
