@@ -20,6 +20,10 @@ partner."
 
 ---
 
+## Current hardening wave (2026-11-23)
+
+L7 stock `color_button` delegation is implemented at `eb2237a917e6697f990ffe8cb1da09e57f517029`, with brief `12471890` and claim `b391649b`. The exact focused stock command is 2/2, strict `umber-gui` clippy is clean, and the full crate is 151/151. R1's test-filter finding is fixed and R2 `deleg_2c79a7b1` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. PerChannel scalar-mode K1 is the next independent kill, followed by Bake/Export history context, all-channel material picking, the Assets mesh category, OccluderScope threading coverage, and XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+
 ## Current vector wave (2026-11-21)
 
 K8i CSS2 functional RGB editable-vector import is landed at `0e543038`, with brief
@@ -318,7 +322,7 @@ freeze-recovery close scripts; the loop restart machinery
 
 ## Landed waves + gates (dependency-ordered; each row names its gate and its status)
 
-### Ungated engineering — truth refreshed 2026-11-17: every row below is LANDED; no ungated engineering runway remains
+### Landed engineering archive — current runway is reconciled in `docs/loop/next-steps-2026-11-23.md`
 
 | Kill | Closes | Notes |
 |---|---|---|
@@ -327,11 +331,11 @@ freeze-recovery close scripts; the loop restart machinery
 | The AssetStore GC shell caller | ~~the 10-16 engine's missing consumer~~ **LANDED `1f0e438` (row 238)** — `umber gc <project> [--delete]` headless lane over `asset_gc::run_cli` (live-set builder = manifest-referenced safety); row marked landed 2026-11-07 (row 258) | closed |
 | L2b: the four same-class density arms | **LANDED 2026-10-25** (report in kill-reports): the symmetry snapshot, the clone offset, the fill raster, and the seam mirror radius all migrated to `texels_per_uv_for_channel(tile, &active_channel)` on the L2 kill's own pattern — every arm serves the active channel's stroke/fill. The set-level scalar stays (its definition + the two pinning tests). Battery GREEN 179+851. | closed; the differing-channel pin rides the L2 report's class |
 | L3b: the multi-entry ID cache | **LANDED 2026-10-25** (report in kill-reports): the three-entry FIFO ring (`ID_BAKE_CACHE_CAP`) kills the A↔B tile-switch thrash the one-entry judgment accepted — the hit path's position/swap_remove/restore-push-to-tail, the shared `push_id_bake` FIFO insert, the prewarm's whole-mesh gate unchanged; the pin proves two bakes for three alternating clicks. Battery GREEN 180+851. | closed; the cap's tuning rides live use |
-| Quick mask persistence | **LANDED 2026-10-31 (`73f8724`, in origin/master)** — DECIDED PERSIST, 8-bit sidecar as amended: `paint/quick_mask/<set-hash>.{json,bin}` + own `manifest.txt` commit protocol under the paint sidecar (no core schema change); round(v*255) makes save → load → save byte-identical to the GPU gate. Undoable mask strokes = named follow-up (needs a new journal op type — the journal is LayerCommand-typed, the mask lives in PaintState) | lens A's gap 1 closed; the undo half stays open as the follow-up |
+| Quick mask persistence | **LANDED 2026-10-31 (`73f8724`, in origin/master)** — DECIDED PERSIST, 8-bit sidecar as amended: `paint/quick_mask/<set-hash>.{json,bin}` + own `manifest.txt` commit protocol under the paint sidecar (no core schema change); round(v*255) makes save → load → save byte-identical to the GPU gate. Undoable mask strokes and ID clicks LANDED `c5909efe` (one journal step per gesture, filter-op stack precedent) | lens A's gap 1 and its undo follow-up are both closed |
 | Symmetry persistence | **LANDED 2026-10-24**: the `.umber` carries it (core's `ProjectSymmetry` mirror + the app's boundary conversions + the additive-carry rule; the `.umberbrush` half = the documented non-goal — a preset is a brush shape, not a tool state); report in kill-reports | lens A's gap 2 closed; the quick mask's design question stays the open half of the pair |
 | wave-a11y-first-pass | keyboard navigation + focus states | **LANDED 2026-11-12 (row 378, lock razul-a11y-first-pass)**: kittest keyboard journeys (Tab traversal, focus ring, Esc, number-key menus) — brief `docs/loop/briefs/2026-11-11-a11y-first-pass.md` |
-| **The Assets panel (R-C1, P0)** | **LANDED 2026-10-24 (the v1 discoverability layer)**: the library browser (search + Brushes/Materials/Masks) over the existing engines; the `select_preset_by_name` seam; the smart-mask compose flow extracted (one path, two doors); the placeholder dead; report `docs/loop/kill-reports/2026-10-24-rc1-assets-panel.md`. The named follow-ups: drag-to-stack, thumbnails, saved searches, custom dirs, the filter/mesh/env categories. |
-| **Layer-stack flatten (R-B1, P0)** | ~~group → baked fill layer~~ → LANDED 2026-10-24 as the SELECTED-LAYERS flatten: `bake_layers` (the isolated fold) + the Layers panel button + the shell's handler; fully undoable (tombstones + journal reverts); report `docs/loop/kill-reports/2026-10-24-rb1-flatten.md`. The folder kind + the compound one-step = the named follow-ups. |
+| **The Assets panel (R-C1, P0)** | **LANDED 2026-10-24 (the v1 discoverability layer)**: the library browser (search + Brushes/Materials/Masks) over the existing engines; the `select_preset_by_name` seam; the smart-mask compose flow extracted (one path, two doors); the placeholder dead; report `docs/loop/kill-reports/2026-10-24-rc1-assets-panel.md`. Landed follow-ups: drag-to-stack `769c2544`, thumbnails `e9c02bd0`, custom dirs `68b45a69`, import dialog `77f58d41`, browser kittest `09867156`, saved searches `38a4fd21`, env `0d6f08f8`, filters `05105aa4`. Only the mesh category remains. |
+| **Layer-stack flatten (R-B1, P0)** | ~~group → baked fill layer~~ → LANDED 2026-10-24 as the SELECTED-LAYERS flatten: `bake_layers` (the isolated fold) + the Layers panel button + the shell's handler; fully undoable (tombstones + journal reverts); report `docs/loop/kill-reports/2026-10-24-rb1-flatten.md`. Folder kind landed `cc381ce6`; grouped flatten undo landed `e008dcc8`. |
 | Material picker (R-A10) | **LANDED 2026-10-24 (the v1)**: Ctrl+Alt+click picks the ACTIVE channel's composite texel at the cursor into the selected fill layer's Solid (the inspector's mirrored-row convention, the panel's own journalable SetFill path; the status-bar hint in both catalogs); report in kill-reports. The two landed halves: the channel target (0f55ebd) + the pick gesture. Follow-ups: the all-channels mode, the e2e kittest, ~~the pick toast~~ **CLOSED 2026-10-25: the toast rides the home_actions rail's own pattern (the viewer's pick_notices vec, the dock closure's tuple return, the app's post loop) — `uv.pick-applied` in both catalogs with the hex color**. | the census's "small" row grew a prerequisite + this v1 across two kills; both banked |
 | Projection fill (R-A2) | **CLOSED to v3 (2026-11-10)**: v1 decal projector landed 11-08 (rows 277-281, `c573dc87`; load PNG/`.svg`, Arm freezes camera+viewport rect, Apply rasterizes through the frozen camera, one undo step, stencil-gated); v2a tiling, v2b follow-camera, v2c backface culling, then **v2d one-pass raster** (`98fb6e8e`, CI `42646713045` — ~34 min UI freeze at 4K → ~0.6 s), **W1.1 the UV conditioning rule** (`7aad67c3`, CI `42677040220` — needle triangles are not valid footprints, CPU+GPU) and **v3 depth/occlusion culling** (`b228767f`, 2026-11-10 — depth raster + `ProjectionState::occlusion`, default on). Remaining: seam/symmetry expansion of projections (a product question), a decal channel + the bake family | plan of record: `docs/loop/waves/2026-11-09-wave-plan.md`; plan `docs/specs/projection-fill-plan.md` |
 | Geometry masks (R-B2) | **LANDED 2026-11-14** (K1 `5ff1510c`, K2 `0e4e5035`, K5 `744e114f`, K3 `c98a7ea6`, K4 `4170fac5`, K6 `fa31f7df`; design `docs/loop/briefs/2026-11-12-geomask-design.md`; kill reports `docs/loop/kill-reports/2026-11-14-w5-geomask-*.md`) | per-mesh/per-tile include/exclude on layers, hide-excluded, copy/paste — rides UDIM |
@@ -350,7 +354,6 @@ freeze-recovery close scripts; the loop restart machinery
 | Lane | The gate |
 |---|---|
 | L4: winink live hook | the file IS in the tree (`crates/stylus/src/winink.rs`, 307 lines of passive decode — `GetPointerInfo`/`GetPointerPenInfo`, `#[cfg(all(windows, feature = "winink"))]`); the gate is the **WndProc hook + HWND hand-off**, not the bytes (module doc: "Live pointer-pump integration is Wave 2") |
-| L7: the color_button delegate conversion | G1-gated |
 | wave-stylus-win32 | the Windows dual-path; real-pen verification = D1's Windows leg (partner-gated) |
 | wave-wasm-shaders / tessellation / hdr / ray-query | the eframe/wgpu upgrade postures (the probes built) |
 | The .spp staged import R1-R4 | the fidelity report's staged lanes (the formats lens reports which are landed) |
@@ -430,8 +433,8 @@ The published alpha and SPEC v1.1 ratification are complete (`v0.1.0-alpha.1` at
 | Color management | PARITY |
 | Export/Import | PARITY (the .spp v2 staged lanes; text unsupported) |
 | History/undo | PARITY (the unified timeline LANDED — L6, `75c9594`, 2026-10-27) |
-| UI/UX density | PARTIAL → closing (36/43 GUI kills by 10-24; the 2026-11-05 UI/UX pass landed U1-U4: brush shelf + Shift+Space popup + catalogs, Dark/Light/High Contrast themes with WCAG floors, Reduce Motion; open: U5 icon rail + collapsible columns, parked with the egui 0.37 migration until egui_dock supports it) |
-| Assets/ecosystem | **GAP → narrowing** (the Assets panel + brush shelf landed; starter content waves K5-K9 landing 2026-11-05: import-asset CLI, ten materials, studio environments) |
+| UI/UX density | PARTIAL → closing (36/43 GUI kills by 10-24; the 2026-11-05 UI/UX pass landed U1-U4: brush shelf + Shift+Space popup + catalogs, Dark/Light/High Contrast themes with WCAG floors, Reduce Motion; U7 landed the icon rail + collapsible columns through `1fc6ca12`/`89249567`; only the U5 egui 0.37/egui_dock migration remains) |
+| Assets/ecosystem | **GAP → narrowing** (the Assets panel + brush shelf landed; starter content waves K5-K9 landed 2026-11-05: import-asset CLI, ten materials, studio environments; R-C1 drag/thumbnails/custom dirs/import dialog/kittest/saved searches/env/filters are landed, with only the mesh category remaining) |
 | Scripting/automation | **EXCEEDS** (headless-first, versioned JSONL) + MCP stdio server + token-auth loopback control landed 2026-11-01 `3331bcb` (Hermes registration = queue row 152) + app-side control v2 (`ui.inspect`, `viewport.screenshot`) and `--bridge` MCP relay 2026-11-05 (queue row 153) + the client-library gap |
 | Interchange (MaterialX, diffable format) | **EXCEEDS** |
 | Community/local-first/no-telemetry/never-crash | **EXCEEDS** |
@@ -442,12 +445,13 @@ full comparison: `docs/loop/audit-2026-10-24-lens-spp.md`.
 
 ## The wave protocol (standing, the two-gate model)
 
-Bessa's ruling: big development waves, tests+CI after. Gate 1 =
+Bessa's ruling: big development waves, tests before the push. Gate 1 =
 scripts/wave-battery.sh per kill (fmt + clippy -D warnings + full
 suites, local, the flock at /tmp/umber-cargo.lock, the machine-fit
-defaults). Gate 2 = ONE push per wave + ONE CI run
-(scripts/ci-watch.sh backgrounded — verdicts ping between turns,
-nothing foreground-sleeps). Kills batch as unpushed commits between
-gates. Briefs are written fresh from live anchors at dispatch
-time; kill reports + the touched docs' rows update in the same
-commit as the kill.
+defaults). Gate 2 = ONE safe-push per wave, which gates the affected
+crates itself, followed by `git ls-remote` verification. CI is a release
+gate at version bumps, tags, pull requests, and its weekly schedule, not
+a per-push run; `scripts/release-ci.sh` supplies that release verdict.
+Kills batch as unpushed commits between gates. Briefs are written fresh
+from live anchors at dispatch time; kill reports + the touched docs' rows
+update in the same commit as the kill.
