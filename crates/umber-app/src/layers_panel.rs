@@ -33,8 +33,9 @@
 //!   edits and other machines — and the refresh badges it honestly.
 //! * Blend modes render as their `BlendMode::{:?}` identifiers (the Graph
 //!   panel's `node_def` precedent — technical identifiers, not prose), so no
-//!   `.ftl` key per mode. The combo still filters exactly like the driver:
-//!   never `Passthrough`, normal-map modes only on `normal`.
+//!   `.ftl` key per mode. The combo filters `Passthrough`, keeps normal-map
+//!   modes on `normal`, and hides only the HSV no-op trio on scalar-semantic
+//!   channels. Value stays everywhere; the driver and saved modes stay valid.
 //! * The declaration is re-parsed when an expanded section draws (no cached
 //!   copy beside the definition — definition and declaration can never
 //!   drift, doc §1.2). Definitions are small graphs; the parse costs
@@ -83,11 +84,25 @@ pub fn paint_gate_allows(stack: &LayerStack, layer: u64) -> bool {
     stack.check_paintable(layer).is_ok()
 }
 
+/// Whether the channel's consumers read its plane as color rather than
+/// scalar data. The empty string is the separate layer-compositing context
+/// and preserves its established full list; other unknown names default to
+/// scalar semantics (masks/weights are the common custom-channel case).
+/// `normal` is handled separately by the picker's existing special case.
+fn channel_is_color_semantic(channel: &str) -> bool {
+    matches!(
+        channel,
+        "" | "baseColor" | "diffuse" | "albedo" | "emissive"
+    )
+}
+
 /// The blend modes one channel row may pick: every [`BlendMode`] except
 /// `Passthrough` (never a pixel op — the driver skips that channel with the
 /// badge, it never falls back to Normal), minus the normal-map trio unless
 /// the channel IS `normal` (the `is_normal_map` routing contract, doc §1.2).
-/// Order is the enum's declaration order (stable, pinned by test).
+/// Scalar-semantic channels also hide the HSV no-op trio (Tint, Saturation,
+/// Color); Value remains meaningful everywhere. Order is the enum's
+/// declaration order (stable, pinned by test).
 pub fn channel_blend_options(channel: &str) -> Vec<BlendMode> {
     const ALL: [BlendMode; 32] = [
         BlendMode::Normal,
@@ -123,10 +138,16 @@ pub fn channel_blend_options(channel: &str) -> Vec<BlendMode> {
         BlendMode::NormalDetail,
         BlendMode::NormalInverseDetail,
     ];
+    let allow_hsv_noop_trio = channel == "normal" || channel_is_color_semantic(channel);
     ALL.into_iter()
         .filter(|mode| {
             !matches!(mode, BlendMode::Passthrough)
                 && (!mode.is_normal_map() || channel == "normal")
+                && (allow_hsv_noop_trio
+                    || !matches!(
+                        mode,
+                        BlendMode::Tint | BlendMode::Saturation | BlendMode::Color
+                    ))
         })
         .collect()
 }
@@ -2072,39 +2093,78 @@ mod tests {
             31,
             "32 modes minus Passthrough (the trio stays on `normal`)"
         );
-        assert!(
-            !normal.contains(&BlendMode::Passthrough),
-            "Passthrough is never offered"
-        );
-        for trio in [
+        for mode in [
             BlendMode::NormalCombine,
             BlendMode::NormalDetail,
             BlendMode::NormalInverseDetail,
+            BlendMode::Tint,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Value,
         ] {
             assert!(
-                normal.contains(&trio),
-                "{trio:?} is offered on the `normal` channel"
+                normal.contains(&mode),
+                "{mode:?} is offered on the `normal` channel"
             );
         }
-        let roughness = channel_blend_options("roughness");
-        assert_eq!(
-            roughness.len(),
-            28,
-            "32 modes minus Passthrough minus the normal-map trio"
-        );
-        for banned in [
-            BlendMode::Passthrough,
-            BlendMode::NormalCombine,
-            BlendMode::NormalDetail,
-            BlendMode::NormalInverseDetail,
+        assert!(!normal.contains(&BlendMode::Passthrough));
+
+        for channel in ["", "baseColor", "diffuse", "albedo", "emissive"] {
+            let options = channel_blend_options(channel);
+            assert_eq!(
+                options.len(),
+                28,
+                "{channel:?}: 32 modes minus Passthrough and the normal-map trio"
+            );
+            for mode in [
+                BlendMode::Tint,
+                BlendMode::Saturation,
+                BlendMode::Color,
+                BlendMode::Value,
+            ] {
+                assert!(
+                    options.contains(&mode),
+                    "{mode:?} is offered on color-semantic {channel:?}"
+                );
+            }
+        }
+
+        for channel in [
+            "roughness",
+            "metallic",
+            "height",
+            "mask",
+            "weight",
+            "custom-data",
+            "occlusion",
         ] {
-            assert!(
-                !roughness.contains(&banned),
-                "{banned:?} is not offered off `normal`"
+            let options = channel_blend_options(channel);
+            assert_eq!(
+                options.len(),
+                25,
+                "{channel}: scalar semantics also hide the HSV no-op trio"
             );
+            for banned in [
+                BlendMode::Passthrough,
+                BlendMode::NormalCombine,
+                BlendMode::NormalDetail,
+                BlendMode::NormalInverseDetail,
+                BlendMode::Tint,
+                BlendMode::Saturation,
+                BlendMode::Color,
+            ] {
+                assert!(
+                    !options.contains(&banned),
+                    "{banned:?} is not offered on scalar-semantic {channel}"
+                );
+            }
+            assert!(
+                options.contains(&BlendMode::Value),
+                "Value stays meaningful on {channel}"
+            );
+            assert!(options.contains(&BlendMode::Multiply));
+            assert!(options.contains(&BlendMode::Normal));
         }
-        assert!(roughness.contains(&BlendMode::Multiply));
-        assert!(roughness.contains(&BlendMode::Normal));
     }
 
     #[test]
