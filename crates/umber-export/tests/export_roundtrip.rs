@@ -2,12 +2,13 @@
 //! open flank after row 156-A hardened the import side).
 //!
 //! umber-export's PUBLIC mesh-export surface, enumerated from
-//! `src/lib.rs`, is exactly two formats: `.usda` via
-//! [`umber_export::usd::to_usda_document`] / [`umber_export::usd::write_usda`]
-//! and `.obj` via [`umber_export::obj::to_obj_document`] /
-//! [`umber_export::obj::write_obj`]. The fbx/gltf/usdc/usdz lanes are
-//! import-only in this workspace — no exporter for them exists anywhere under
-//! `crates/` (the GLB half of the mesh-export ledger remains unimplemented).
+//! `src/lib.rs`, is exactly three formats: `.usda` via
+//! [`umber_export::usd::to_usda_document`] / [`umber_export::usd::write_usda`],
+//! `.obj` via [`umber_export::obj::to_obj_document`] /
+//! [`umber_export::obj::write_obj`], and `.glb` via
+//! [`umber_export::glb::to_glb_document`] / [`umber_export::glb::write_glb`].
+//! The fbx/usdc/usdz lanes are import-only in this workspace — no exporter
+//! for them exists anywhere under `crates/`.
 //!
 //! Every fixture under `umber-mesh/tests/corpus/` + `tests/assets/` is:
 //!
@@ -35,7 +36,7 @@ use umber_mesh::MeshData;
 
 /// The mesh-export formats umber-export's public API supports,
 /// enumerated from `src/lib.rs` (see the module doc).
-const MESH_EXPORT_FORMATS: [&str; 2] = ["usda", "obj"];
+const MESH_EXPORT_FORMATS: [&str; 3] = ["usda", "obj", "glb"];
 
 const CORPUS_SUBDIRS: [&str; 5] = ["fbx", "gltf", "usda", "usdc", "usdz"];
 
@@ -129,6 +130,7 @@ fn export_and_reimport(
     let exported = match format {
         "usda" => run_catch(|| write_usda(dir, asset, &view, &[])),
         "obj" => run_catch(|| umber_export::obj::write_obj(dir, asset, &view)),
+        "glb" => run_catch(|| umber_export::glb::write_glb(dir, asset, &view)),
         other => return Err(format!("{asset}: unknown test format {other}")),
     };
     let path = exported
@@ -137,6 +139,7 @@ fn export_and_reimport(
     let cap = match format {
         "usda" => MAX_USDA_EXPORT_BYTES,
         "obj" => umber_export::obj::MAX_OBJ_EXPORT_BYTES,
+        "glb" => umber_export::glb::MAX_GLB_EXPORT_BYTES,
         other => unreachable!("unknown test format {other}"),
     };
     let len = std::fs::metadata(&path)
@@ -157,6 +160,9 @@ fn export_and_reimport(
         "obj" => run_catch(|| umber_mesh::load_obj(&path))
             .map_err(|p| format!("{asset}: re-import via load_obj {p}"))?
             .map_err(|e| format!("{asset}: exported file must re-import, load_obj gave: {e}"))?,
+        "glb" => run_catch(|| umber_mesh::load_gltf(&path))
+            .map_err(|p| format!("{asset}: re-import via load_gltf {p}"))?
+            .map_err(|e| format!("{asset}: exported file must re-import, load_gltf gave: {e}"))?,
         other => unreachable!("unknown test format {other}"),
     };
     for (entry, back) in [("load", &back_load), (format, &back_format)] {

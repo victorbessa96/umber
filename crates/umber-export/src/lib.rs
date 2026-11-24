@@ -14,6 +14,7 @@ pub mod dither;
 pub mod driver;
 pub mod exr;
 pub mod formats;
+pub mod glb;
 pub mod icc;
 pub mod obj;
 pub mod png;

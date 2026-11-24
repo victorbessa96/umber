@@ -18,11 +18,11 @@ pub const MAX_OBJ_EXPORT_BYTES: u64 = 1 << 28;
 
 /// Upper bound on one sanitized object/file identifier. Filesystem components
 /// and the OBJ object declaration stay bounded before any allocation happens.
-const MAX_OBJ_NAME_BYTES: usize = 240;
+pub(crate) const MAX_OBJ_NAME_BYTES: usize = 240;
 
 /// Byte length of [`obj_name`]'s sanitized output, computed without allocating
 /// the name. Every input character maps to at most one ASCII byte.
-fn obj_name_len(asset: &str) -> usize {
+pub(crate) fn obj_name_len(asset: &str) -> usize {
     let mut len = asset.chars().count();
     if len == 0 || asset.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         len += 2;
@@ -32,7 +32,7 @@ fn obj_name_len(asset: &str) -> usize {
 
 /// One bounded ASCII object/file identifier: no path separators or whitespace
 /// can escape the output directory or split the OBJ object declaration.
-fn obj_name(asset: &str) -> String {
+pub(crate) fn obj_name(asset: &str) -> String {
     let mut name: String = asset
         .chars()
         .map(|c| {
