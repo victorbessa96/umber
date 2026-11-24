@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** control channel + bridge live smoke is COMPLETE, on brief `5961e6d8eef3` and claim `fcd0f12d51bb`; queue row 597 and report `docs/loop/kill-reports/2026-11-24-umber-control-smoke.md`. Current debug build passed wrong-token unauthorized+EOF, authed `ping`/11 methods/`ui.inspect` with panels/layers/tool, a decoded 1296×729 PNG with 3,056 colors and matching dimensions, and bridge `initialize` byte-identical to a direct `umber-cli mcp` child. App cleanup and scratch removal verified; no app source changed. Final report/queue hashes and origin verification remain. Row-156 idea-backlog verification is next. This status-doc commit releases `razul-control-smoke`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** OBJ mesh export round-trip is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-obj-export`, on committed brief `b8e12d0b20d9` and queue row 598. Base `230b5e2cbf00bc6b8d5f0c5fec5d5e6a3a99970e` was clean and origin-equal, with no live sibling or prior lock. Deterministic v/vt/vn/f geometry, typed ragged/over-cap failures, real write→load/load_obj round-trip, hostile-output battery extension, independent review, report, and one safe-push wave. No GLB, texture/material, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 
