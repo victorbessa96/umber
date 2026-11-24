@@ -58,9 +58,11 @@
 //! * **Time is server milliseconds → ns** (`ms * 1_000_000`, saturating).
 //!   The epoch is the X server's start — relative only, like winink's
 //!   `dwTime` epoch. Cross-backend clock comparison is meaningless.
-//! * **No hotplug re-query.** Mappings snapshot at `open()`; a tablet
-//!   plugged in later strokes at pressure 1.0 with no tilt until restart.
-//!   Re-querying on `XI_HierarchyChanged` is the follow-up.
+//! * **Hotplug re-query is live.** `XI_HierarchyChanged` runs a fresh
+//!   `XIQueryDevice` pass and swaps the maps/eraser set atomically on
+//!   success. A later query failure logs a warning and preserves the
+//!   previous known-good state instead of erasing it. The hierarchy
+//!   notification itself emits no `SourcedEvent`.
 //! * **Poll is bounded:** one `poll()` drains at most 256 events so a
 //!   tablet flood cannot stall a frame; the remainder waits for the next
 //!   frame (Xlib queues it on our own connection — nothing is lost).
@@ -84,8 +86,8 @@ use std::ptr;
 use thiserror::Error;
 use x11_dl::xinput2::{
     XIAllDevices, XIDeviceEvent, XIDeviceInfo, XIEnterEvent, XIEventMask, XISetMask,
-    XIValuatorClass, XIValuatorClassInfo, XI_ButtonPress, XI_ButtonRelease, XI_Enter, XI_Leave,
-    XI_Motion, XInput2,
+    XIValuatorClass, XIValuatorClassInfo, XI_ButtonPress, XI_ButtonRelease, XI_Enter,
+    XI_HierarchyChanged, XI_Leave, XI_Motion, XInput2,
 };
 use x11_dl::xlib::{Atom, Display, GenericEvent, Time, Window, XEvent, XGenericEventCookie, Xlib};
 
@@ -237,6 +239,26 @@ fn contact_or_eraser(is_eraser: bool, down: bool, time_ns: u64) -> TabletEvent {
     }
 }
 
+/// The next maps and eraser set produced by one hierarchy refresh.
+type Refresh = (HashMap<c_int, DeviceMapping>, HashSet<c_int>);
+
+/// Applies one hierarchy refresh atomically. A failed query preserves the
+/// previous known-good maps and eraser set instead of erasing them.
+fn apply_refresh(
+    mappings: &mut HashMap<c_int, DeviceMapping>,
+    erasers: &mut HashSet<c_int>,
+    result: Result<Refresh, Xi2Error>,
+) -> bool {
+    match result {
+        Ok((next_mappings, next_erasers)) => {
+            *mappings = next_mappings;
+            *erasers = next_erasers;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// The XI2 event reader: our own X connection plus the per-device axis
 /// mappings snapshotted at [`Self::open`].
 ///
@@ -335,9 +357,19 @@ impl Xi2Reader {
         Ok(())
     }
 
-    /// One `XIQueryDevice(XIAllDevices)` pass: per-`sourceid` axis
-    /// mappings (label-resolved) plus the eraser set (name-scanned).
+    /// The initial device scan: the same query as a hierarchy refresh,
+    /// applied through the atomic swap helper.
     fn scan_devices(&mut self) -> Result<(), Xi2Error> {
+        let next = self.scan_devices_into()?;
+        apply_refresh(&mut self.mappings, &mut self.erasers, Ok(next));
+        Ok(())
+    }
+
+    /// One `XIQueryDevice(XIAllDevices)` pass into a fresh result. Nothing
+    /// touches the live maps until this whole pass succeeds.
+    fn scan_devices_into(&self) -> Result<Refresh, Xi2Error> {
+        let mut mappings = HashMap::new();
+        let mut erasers = HashSet::new();
         let mut count: c_int = 0;
         // SAFETY: `&mut count` is a valid out-param. Null return =
         // failure; otherwise an array of `count` entries owned by us
@@ -350,21 +382,26 @@ impl Xi2Reader {
             // No devices (or a nonsense count — never build a slice
             // from it): free and carry empty mappings.
             unsafe { (self.xi.XIFreeDeviceInfo)(infos) };
-            return Ok(());
+            return Ok((mappings, erasers));
         }
         // SAFETY: `count` entries, valid until freed below.
         let infos = unsafe { std::slice::from_raw_parts(infos, count as usize) };
         for info in infos {
-            self.scan_device(info);
+            self.scan_device_into(info, &mut mappings, &mut erasers);
         }
         // SAFETY: the exact pointer `XIQueryDevice` returned.
         unsafe { (self.xi.XIFreeDeviceInfo)(infos.as_ptr() as *mut XIDeviceInfo) };
-        Ok(())
+        Ok((mappings, erasers))
     }
 
-    /// Folds one `XIDeviceInfo` into `mappings`/`erasers`. Called only
-    /// from [`Self::scan_devices`] (its unsafety contract covers us).
-    fn scan_device(&mut self, info: &XIDeviceInfo) {
+    /// Folds one `XIDeviceInfo` into a fresh result. Called only from
+    /// [`Self::scan_devices_into`] (its unsafety contract covers us).
+    fn scan_device_into(
+        &self,
+        info: &XIDeviceInfo,
+        mappings: &mut HashMap<c_int, DeviceMapping>,
+        erasers: &mut HashSet<c_int>,
+    ) {
         let name = if info.name.is_null() {
             String::new()
         } else {
@@ -396,7 +433,7 @@ impl Xi2Reader {
                 min: valuator.min,
                 max: valuator.max,
             };
-            let mapping = self.mappings.entry(valuator.sourceid).or_default();
+            let mapping = mappings.entry(valuator.sourceid).or_default();
             match role {
                 AxisRole::Pressure => mapping.pressure = Some(axis),
                 AxisRole::TiltX => mapping.tilt_x = Some(axis),
@@ -404,12 +441,30 @@ impl Xi2Reader {
                 AxisRole::Other => {}
             }
             if eraser {
-                self.erasers.insert(info.deviceid);
-                self.erasers.insert(valuator.sourceid);
+                erasers.insert(info.deviceid);
+                erasers.insert(valuator.sourceid);
             }
         }
         if eraser {
             log::info!("stylus: XI2 eraser device: {name:?}");
+        }
+    }
+
+    /// Handles one hierarchy notification: query fresh maps, swap only on
+    /// success, and preserve known-good state on failure.
+    fn refresh_devices(&mut self) {
+        match self.scan_devices_into() {
+            Ok(next) => {
+                apply_refresh(&mut self.mappings, &mut self.erasers, Ok(next));
+                log::info!(
+                    "stylus: XI2 hierarchy refresh ({} devices, {} erasers)",
+                    self.mappings.len(),
+                    self.erasers.len()
+                );
+            }
+            Err(err) => {
+                log::warn!("stylus: XI2 hierarchy refresh failed: {err}; keeping previous mappings")
+            }
         }
     }
 
@@ -445,6 +500,7 @@ impl Xi2Reader {
         XISetMask(&mut bytes, XI_ButtonRelease);
         XISetMask(&mut bytes, XI_Enter);
         XISetMask(&mut bytes, XI_Leave);
+        XISetMask(&mut bytes, XI_HierarchyChanged);
         let mut mask = XIEventMask {
             deviceid: XIAllDevices,
             mask_len: bytes.len() as c_int,
@@ -506,7 +562,11 @@ impl Xi2Reader {
 
     /// Reads one GenericEvent cookie's payload. Returns the events (0
     /// or 1 — one XI2 wire event maps to one `TabletEvent`).
-    fn map_cookie(&self, cookie: &XGenericEventCookie) -> Vec<SourcedEvent> {
+    fn map_cookie(&mut self, cookie: &XGenericEventCookie) -> Vec<SourcedEvent> {
+        if cookie.evtype == XI_HierarchyChanged {
+            self.refresh_devices();
+            return Vec::new();
+        }
         if cookie.evtype == XI_Enter {
             // SAFETY: `evtype` discriminates — payload IS an enter event;
             // `XGetEventData` fetched it (caller contract).
@@ -788,6 +848,76 @@ mod tests {
                 time_ns: 14
             }
         );
+    }
+
+    #[test]
+    fn hierarchy_refresh_swaps_preserves_and_swaps_again() {
+        let axis = |index| AxisDesc {
+            index,
+            min: 0.0,
+            max: 1023.0,
+        };
+        let initial = HashMap::from([(
+            1,
+            DeviceMapping {
+                pressure: Some(axis(2)),
+                tilt_x: None,
+                tilt_y: None,
+            },
+        )]);
+        let next = HashMap::from([(
+            2,
+            DeviceMapping {
+                pressure: None,
+                tilt_x: Some(axis(3)),
+                tilt_y: None,
+            },
+        )]);
+        let third = HashMap::from([(
+            3,
+            DeviceMapping {
+                pressure: Some(axis(4)),
+                tilt_x: None,
+                tilt_y: None,
+            },
+        )]);
+        let mut mappings = initial.clone();
+        let mut erasers = HashSet::from([1]);
+
+        assert!(apply_refresh(
+            &mut mappings,
+            &mut erasers,
+            Ok((next.clone(), HashSet::from([2])))
+        ));
+        assert_eq!(mappings, next, "successful refresh replaces mappings");
+        assert_eq!(
+            erasers,
+            HashSet::from([2]),
+            "successful refresh replaces erasers"
+        );
+
+        assert!(!apply_refresh(
+            &mut mappings,
+            &mut erasers,
+            Err(Xi2Error::QueryFailed)
+        ));
+        assert_eq!(
+            mappings, next,
+            "query failure preserves known-good mappings"
+        );
+        assert_eq!(
+            erasers,
+            HashSet::from([2]),
+            "query failure preserves erasers"
+        );
+
+        assert!(apply_refresh(
+            &mut mappings,
+            &mut erasers,
+            Ok((third.clone(), HashSet::new()))
+        ));
+        assert_eq!(mappings, third, "the next successful refresh swaps again");
+        assert!(erasers.is_empty(), "a device removal clears the eraser set");
     }
 
     #[test]
