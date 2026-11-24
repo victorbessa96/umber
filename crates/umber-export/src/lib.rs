@@ -15,6 +15,7 @@ pub mod driver;
 pub mod exr;
 pub mod formats;
 pub mod icc;
+pub mod obj;
 pub mod png;
 pub mod presets;
 pub mod psd;

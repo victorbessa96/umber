@@ -2,12 +2,12 @@
 //! open flank after row 156-A hardened the import side).
 //!
 //! umber-export's PUBLIC mesh-export surface, enumerated from
-//! `src/lib.rs`, is exactly one format: `.usda` via
-//! [`umber_export::usd::to_usda_document`] / [`umber_export::usd::write_usda`].
-//! The fbx/gltf/usdc/usdz lanes are import-only in this workspace — no
-//! exporter for them exists anywhere under `crates/` (the "glb/obj
-//! mesh-export round-trip" ledger row is unimplemented) — so `.usda` is
-//! the only format there is to round-trip through.
+//! `src/lib.rs`, is exactly two formats: `.usda` via
+//! [`umber_export::usd::to_usda_document`] / [`umber_export::usd::write_usda`]
+//! and `.obj` via [`umber_export::obj::to_obj_document`] /
+//! [`umber_export::obj::write_obj`]. The fbx/gltf/usdc/usdz lanes are
+//! import-only in this workspace — no exporter for them exists anywhere under
+//! `crates/` (the GLB half of the mesh-export ledger remains unimplemented).
 //!
 //! Every fixture under `umber-mesh/tests/corpus/` + `tests/assets/` is:
 //!
@@ -35,7 +35,7 @@ use umber_mesh::MeshData;
 
 /// The mesh-export formats umber-export's public API supports,
 /// enumerated from `src/lib.rs` (see the module doc).
-const MESH_EXPORT_FORMATS: [&str; 1] = ["usda"];
+const MESH_EXPORT_FORMATS: [&str; 2] = ["usda", "obj"];
 
 const CORPUS_SUBDIRS: [&str; 5] = ["fbx", "gltf", "usda", "usdc", "usdz"];
 
@@ -125,29 +125,41 @@ fn export_and_reimport(
     mesh: &MeshData,
     dir: &Path,
 ) -> Result<(), String> {
-    assert_eq!(
-        format, "usda",
-        "the only supported mesh format (see module doc)"
-    );
     let view = view_of(mesh);
-    let path = run_catch(|| write_usda(dir, asset, &view, &[]))
+    let exported = match format {
+        "usda" => run_catch(|| write_usda(dir, asset, &view, &[])),
+        "obj" => run_catch(|| umber_export::obj::write_obj(dir, asset, &view)),
+        other => return Err(format!("{asset}: unknown test format {other}")),
+    };
+    let path = exported
         .map_err(|p| format!("{asset}: export {p}"))?
         .map_err(|e| format!("{asset}: export returned a typed error: {e}"))?;
+    let cap = match format {
+        "usda" => MAX_USDA_EXPORT_BYTES,
+        "obj" => umber_export::obj::MAX_OBJ_EXPORT_BYTES,
+        other => unreachable!("unknown test format {other}"),
+    };
     let len = std::fs::metadata(&path)
         .map_err(|e| format!("{asset}: stat exported file: {e}"))?
         .len();
-    if len > MAX_USDA_EXPORT_BYTES {
+    if len > cap {
         return Err(format!(
-            "{asset}: exported file is {len} bytes, over the cap {MAX_USDA_EXPORT_BYTES}"
+            "{asset}: exported file is {len} bytes, over the cap {cap}"
         ));
     }
     let back_load = run_catch(|| umber_mesh::load(&path))
         .map_err(|p| format!("{asset}: re-import via load {p}"))?
         .map_err(|e| format!("{asset}: exported file must re-import, load gave: {e}"))?;
-    let back_usda = run_catch(|| umber_mesh::load_usda(&path))
-        .map_err(|p| format!("{asset}: re-import via load_usda {p}"))?
-        .map_err(|e| format!("{asset}: exported file must re-import, load_usda gave: {e}"))?;
-    for (entry, back) in [("load", &back_load), ("load_usda", &back_usda)] {
+    let back_format = match format {
+        "usda" => run_catch(|| umber_mesh::load_usda(&path))
+            .map_err(|p| format!("{asset}: re-import via load_usda {p}"))?
+            .map_err(|e| format!("{asset}: exported file must re-import, load_usda gave: {e}"))?,
+        "obj" => run_catch(|| umber_mesh::load_obj(&path))
+            .map_err(|p| format!("{asset}: re-import via load_obj {p}"))?
+            .map_err(|e| format!("{asset}: exported file must re-import, load_obj gave: {e}"))?,
+        other => unreachable!("unknown test format {other}"),
+    };
+    for (entry, back) in [("load", &back_load), (format, &back_format)] {
         if back.triangle_count() != mesh.triangle_count() {
             return Err(format!(
                 "{asset}: {entry} triangle count {} != source {}",
