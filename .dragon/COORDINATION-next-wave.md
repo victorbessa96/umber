@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** bounded SVG rgba paint support is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-svg-rgba`, on committed brief `80c6b8f9a1fb` and queue row 594. Base `96d95745444c266179da776201938cd33a0b2ac0` was clean and origin-equal, with no live sibling or prior lock. Parse CSS2 rgba() with alpha composition through fill/stroke opacity, canonical hex+opacity export, and typed malformed-input refusals. RED acceptance, implementation, full umber-core clippy/tests, independent review, report, and one safe-push wave remain. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** bounded SVG `rgba()` is implemented at `8baf5e2d4109dfc21d5b181ca5d48214f2de7543`, on brief `80c6b8f9a1fb` and claim `507443e02e21`; queue row 595 and report `docs/loop/kill-reports/2026-11-24-umber-svg-rgba.md`. CSS2 integer/percentage RGB plus finite `0..1` or `0%..100%` alpha, multiplicative fill/stroke opacity, canonical hex+opacity export, and typed malformed/overflow refusals are landed. R1 overflow finding fixed, exact rgba 2/2, full core 358/0, strict core clippy clean, R2 `deleg_feabc962` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The control-channel smoke tail is next. This status-doc commit releases `razul-svg-rgba`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 

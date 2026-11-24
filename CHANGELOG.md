@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Changed — bounded SVG `rgba()` paint:** `8baf5e2d` parses CSS2 `rgba()` with integer/percentage RGB and finite alpha, composes multiplicatively with fill/stroke opacity, and keeps canonical hex+opacity export. R1 overflow finding fixed, exact rgba 2/2, full core 358/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-svg-rgba.md`.
+
 - **Changed — XI2 hotplug re-query:** `5d874bfb` selects `XI_HierarchyChanged`, refreshes `XIQueryDevice` mappings/erasers atomically on success, preserves known-good state on query failure, and emits no `SourcedEvent` for the notification. Full stylus xi2 23/23, default 7/7, full app 1,277/0, review SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-xi2-hotplug.md`.
 
 - **Changed — OccluderScope kittest:** `69f02313` drives the real combo by accessible value into `bake_current`, asserting request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path. Full app 1,277/0, independent review SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-occluder-kittest.md`.

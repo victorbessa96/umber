@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-XI2 hotplug re-query is implemented at `5d874bfbcce3a00878408e0113c427ee574bb1a7`, with brief `2c1b9ca7` and claim `1bd4c1ef`. `XI_HierarchyChanged` is selected, fresh `XIQueryDevice` results swap atomically on success, failure preserves known-good mappings/erasers, and the notification emits no `SourcedEvent`. Full stylus xi2 23/23, default 7/7, full app 1,277/0, strict stylus clippy clean, review `deleg_b52f29bb` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The bounded vector/SVG slice is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Bounded SVG `rgba()` is implemented at `8baf5e2d4109dfc21d5b181ca5d48214f2de7543`, with brief `80c6b8f9` and claim `507443e0`. CSS2 integer/percentage RGB plus finite `0..1` or `0%..100%` alpha, multiplicative fill/stroke opacity, canonical hex+opacity export, and typed malformed/overflow refusals are landed. R1 overflow finding fixed, exact rgba 2/2, full core 358/0, strict core clippy clean, R2 `deleg_feabc962` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The control-channel smoke tail is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
