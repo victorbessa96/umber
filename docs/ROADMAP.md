@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-Row-156 scoping and docs reconciliation is complete. `docs/research/2026-11-24-row156-scoping.md` records OBJ landed and a concrete gate for every remaining candidate: GLB/material/texture/EyeDepth/parity/theme as named code follow-ups, COW by 8K A/B measurement, packaging release/platform gated. Six verified requirement hashes are filled; XI2/SVG/OBJ rows are current; the stale agent-contract duplicate is retired. Final report/queue hashes and origin verification remain. GLB export is the next named code follow-up. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+GLB mesh export is implemented at `f949199c07fd7a092dd4c6a235609319ac46d4fd`, with brief `d3817e4c` and claim `54d59e22`. Deterministic GLB 2.0 geometry, typed ragged/over-cap/write failures, exact layout assertions, and real `load_gltf` round-trips through the hostile-output battery are landed. R1 layout/atomicity findings fixed, full export 98+7/0, strict export clippy clean, R2 `deleg_7db0834b` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. Material/MTL or the generated parity table is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

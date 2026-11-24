@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** GLB mesh export round-trip is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-glb-export`, on committed brief `d3817e4c6f25` and queue row 602. Base `9dcacafa080176b77a90c2fc223a6d2544cc106e` was clean and origin-equal, with no live sibling or prior lock. Deterministic GLB 2.0 container, typed ragged/over-cap/write failures, real write→load/load_gltf round-trip, hostile-output battery extension, independent review, report, and one safe-push wave. No material/texture, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** GLB mesh export is implemented at `f949199c07fd7a092dd4c6a235609319ac46d4fd`, on brief `d3817e4c6f25` and claim `54d59e22cad5`; queue row 603 and report `docs/loop/kill-reports/2026-11-24-umber-glb-export.md`. Deterministic GLB 2.0 geometry, typed ragged/over-cap/write failures, exact layout assertions, and real `load_gltf` round-trips through the hostile-output battery are landed. R1 layout/atomicity findings fixed, full export 98+7/0, strict export clippy clean, R2 `deleg_7db0834b` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. Material/MTL or the generated parity table is next. This status-doc commit releases `razul-glb-export`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
