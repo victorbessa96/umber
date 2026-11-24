@@ -6,6 +6,9 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Changed — all-channel material picker:** `663632c0` adds a session-only UV-footer `All channels` mode with materialized-only `planes_present()` enumeration, per-channel sampling and straight-alpha conversion, one grouped N-fill creation, selection mirroring, and failure-atomic preflight. Active-channel v1 is preserved, and Ctrl+Alt is exclusive before every capture handle. R1 findings fixed, full picker 5/5, full app 1,271/0, R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-material-picker-all-channels.md`.
+
+
 - **Changed — Bake/Export history context:** `364b082e` records successful completed bake/export jobs exactly once and no failures or early refusals. Bake outcomes enqueue at the actual drain and survive a new bake starting before the shell poll; export records in the real success arm. R1/R2 findings fixed, drain-then-restart regression green, real 8x8 file evidence, full app 1,266/0, R4 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-history-context.md`.
 
 
