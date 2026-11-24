@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-All-channel material picker R-A10 is implemented at `663632c0aa55eab33c5893be9308ffcd495d2b46`, with brief `ac11f655` and claim `7ccf37d0`. The session-only footer `All channels` enumerates materialized channels through `planes_present()`, samples per-channel dimensions with straight-alpha conversion, creates one grouped N-fill set with selection mirroring, and aborts atomically on read failure. Ctrl+Alt runs before every capture handle and ends the in-flight stroke. R1 findings fixed, full picker 5/5, strict app clippy clean, full app 1,271/0, R2 `deleg_80131eb1` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The Assets mesh category is next, followed by OccluderScope threading coverage and XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Assets browser mesh category is implemented at `6ef031944f8b3333d4bc50c440c9c96739209973`, with brief `9935d582` and claim `752c32ab`. Lazy all-extension listing uses first-wins dirs and no eager parsing; `LibraryOutcome.mesh`, `THUMB_KIND_MESH=5`, a sixth default-closed category with generic glyph, and `mesh_loads` through the exact `load_mesh_path` transaction are wired. R1 empty-cache and coverage findings fixed, full mesh 32/32, strict app clippy clean, full app 1,276/0, R2 `deleg_86d758c2` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. OccluderScope combo→request→resolution kittest is next, followed by XI2 hotplug handling. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
