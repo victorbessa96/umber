@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** OccluderScope combo→request→resolution kittest is implemented at `69f02313381cbff393d90b3cb3b6b9bf40ee3a9b`, on brief `f9bdd6d47444` and claim `c06726576fef`; queue row 591 and report `docs/loop/kill-reports/2026-11-24-umber-occluder-kittest.md`. The real combo is driven by accessible value into `bake_current`, with request OwnSet/WholeMesh and actual Ground AO lit/dark output through the worker/poll path. Full app 1,277/0, strict app clippy clean, independent review `deleg_8cba1f3b` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. XI2 hotplug re-query is next. This status-doc commit releases `razul-occluder-kittest`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** XI2 hierarchy hotplug re-query is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-xi2-hotplug`, on committed brief `2c1b9ca7aaa8` and queue row 592. Base `5817b6cd8747bf052d7eba4a1b63e5cbd57dbd56` was clean and origin-equal, with no live sibling or prior lock. Select XI_HierarchyChanged, refresh mappings/erasers atomically through XIQueryDevice, preserve known-good state on query failure, and prove swap/preserve/re-swap semantics with deterministic tests. RED acceptance, implementation, full stylus clippy/tests, independent review, report, and one safe-push wave remain. No second kill, release, centralhost, or public-PR scope.
 
 ## Historical coordination snapshots (append-only; not current status)
 
