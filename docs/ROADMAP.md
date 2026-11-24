@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-23)
 
-GLB mesh export is implemented at `f949199c07fd7a092dd4c6a235609319ac46d4fd`, with brief `d3817e4c` and claim `54d59e22`. Deterministic GLB 2.0 geometry, typed ragged/over-cap/write failures, exact layout assertions, and real `load_gltf` round-trips through the hostile-output battery are landed. R1 layout/atomicity findings fixed, full export 98+7/0, strict export clippy clean, R2 `deleg_7db0834b` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. Material/MTL or the generated parity table is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+The generated capability parity table is implemented at `72774f67574eabddf49441af66d30f7bce3011e0`, with brief `907515da` and claim `04d1265f`. `scripts/parity.py` deterministically generates `docs/parity.md` from the authoritative requirements table and CI checks exact-byte drift. R1's malformed-row, escaped-pipe, CRLF-comparison, and legacy-status findings are fixed; the focused probe passed 8/8, export passed 105/0, and R3 `deleg_b0ab5ab4` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The verified live-docs reconciliation is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

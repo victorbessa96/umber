@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** generated capability parity table is CLAIMED by session `local-f150e2eb08b49cfc70e9c18de051af45f6e45accdfc10fe757ff67a5476d841d` under lock `razul-parity-table`, on committed brief `907515dacb48` and queue row 604. Base `4036ff6649e94f5cd4cc2f51c373476998fbbde3` was clean and origin-equal, with no live sibling or prior lock. Deterministic docs/parity.md from requirements.md, --check drift detection, CI gate, and a negative control proving stale output fails. Docs-only checks, report, safe-push, and origin verify. No production source changes, second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** generated capability parity table is implemented at `72774f67574eabddf49441af66d30f7bce3011e0`, on brief `907515dacb48` and claim `04d1265f6b62`; queue row 605 and report `docs/loop/kill-reports/2026-11-24-umber-parity-table.md`. Deterministic `docs/parity.md` generation and exact-byte CI drift checking are landed. R1's four findings were fixed, the focused probe passed 8/8, export passed 105/0, and R3 `deleg_b0ab5ab4` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The verified live-docs reconciliation is next. This status-doc commit releases `razul-parity-table`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
