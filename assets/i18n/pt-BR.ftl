@@ -919,7 +919,10 @@ uv =
     .no-mesh = nenhuma malha carregada
     .mask-mode = MODO MÁSCARA (X para sair)
     .isolate = Canal
+    .all-channels = Todos os canais
     .pick-applied = Amostrada { $color } para a camada de preenchimento
+    .pick-applied-count = { $count } canais amostrados para novas camadas de preenchimento
+    .pick-failed = Falha ao amostrar material: não foi possível ler { $channel }
     .vector-edit-hint = Vetor: clique adiciona · direito apaga · C fecha · Shift/Alt alças recolhidas
 
 ## Ferramentas de caminho de pintura (§2 P1)

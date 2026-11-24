@@ -43,6 +43,14 @@ fn tile_grid_stroke() -> Stroke {
 
 /// The 2D UV view panel state: the cached quick-mask overlay texture.
 /// Zoom/pan for this view lands with the paint-engine sync work.
+/// One material-pick request handed from the UV view to the shell once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialPick {
+    pub tile: u16,
+    pub uv: [f32; 2],
+    pub all_channels: bool,
+}
+
 #[derive(Default)]
 pub struct UvView {
     /// The quick-mask overlay, rebuilt only when its key changes.
@@ -61,11 +69,14 @@ pub struct UvView {
     inspect: Option<InspectBuf>,
     /// The footer's inspector line, rendered right-aligned.
     inspect_readout: Option<String>,
+    /// Whether Ctrl+Alt+click creates one picked fill per materialized
+    /// channel instead of editing the primary selected fill. Session-only.
+    pub all_channels: bool,
     /// The material pick (R-A10 v1, Ctrl+Alt+click): the tile-local
     /// UV the pick gesture sampled, handed to the shell ONCE — the
     /// shell owns the read + the apply (the take_hover_uv
     /// convention). `None` until the gesture fires.
-    pick_requested: Option<(u16, [f32; 2])>,
+    pick_requested: Option<MaterialPick>,
 }
 
 /// The inspector's cached tile readback (see [`UvView::inspect`]).
@@ -98,7 +109,7 @@ impl UvView {
     /// Takes the pending material pick (R-A10 v1): `(tile, tile-local
     /// UV)` once per Ctrl+Alt+click — the shell reads the composite and
     /// applies the value to the selected fill layer.
-    pub fn take_pick(&mut self) -> Option<(u16, [f32; 2])> {
+    pub fn take_pick(&mut self) -> Option<MaterialPick> {
         self.pick_requested.take()
     }
 
@@ -203,6 +214,27 @@ impl UvView {
         // UV space and feeds the paint conditioner. Left-drag orbits in
         // the 3D view; here left-drag paints.
         if let Some(paint) = paint.as_deref_mut() {
+            // The material pick is the FIRST capture decision, evaluated
+            // from raw input before ANY handle widgets are created. Using
+            // `interact.clicked()` would let a previous frame's mirror or
+            // vector handle steal the chord through hit-test occlusion.
+            let pick_click =
+                ui.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.pointer.primary_clicked());
+            if pick_click {
+                if paint.is_stroking() {
+                    paint.end_stroke();
+                }
+                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    if let Some(uv) = uv_from_pointer(square, pos) {
+                        self.pick_requested = Some(MaterialPick {
+                            tile: paint.active_tile(),
+                            uv: [uv.x, uv.y],
+                            all_channels: self.all_channels,
+                        });
+                    }
+                }
+                return;
+            }
             let interact = ui.interact(
                 square,
                 ui.id().with("uv-paint"),
@@ -398,23 +430,6 @@ impl UvView {
                 && !path_point_active
                 && !vector_handle_active
                 && (interact.dragged_by(egui::PointerButton::Primary) || interact.clicked());
-            // The material pick (R-A10 v1, Ctrl+Alt+click): a bare click
-            // with both modifiers records the pick for the shell (which
-            // owns the read + the apply) and never starts a stroke — the
-            // same exclusion the clone source's Alt-drag carries. Distinct
-            // from the inspector's Shift-hover (a read-only readback) and
-            // the clone's plain Alt-drag (a source set).
-            if interact.clicked() {
-                let ctrl = ui.input(|i| i.modifiers.ctrl);
-                let alt_now = ui.input(|i| i.modifiers.alt);
-                if alt_now && ctrl {
-                    if let Some(pos) = interact.interact_pointer_pos() {
-                        if let Some(uv) = uv_from_pointer(square, pos) {
-                            self.pick_requested = Some((paint.active_tile(), [uv.x, uv.y]));
-                        }
-                    }
-                }
-            }
             // The clone tool's source affordance: Alt + press sets the
             // clone source and never paints — no stroke starts while Alt
             // is held. Re-set every frame the button is down, so the last
@@ -534,6 +549,7 @@ impl UvView {
                             ui.selectable_value(&mut self.isolate, kind, kind.name());
                         }
                     });
+                f.checkbox(&mut self.all_channels, tr("uv.all-channels"));
                 if let Some(read) = self.inspect_readout.clone() {
                     f.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
                         r.monospace(read);
@@ -1206,6 +1222,7 @@ mod tests {
         assert_eq!(view.isolate, ChannelIsolate::All);
         assert!(view.inspect.is_none());
         assert!(view.inspect_readout.is_none());
+        assert!(!view.all_channels);
     }
 
     #[test]

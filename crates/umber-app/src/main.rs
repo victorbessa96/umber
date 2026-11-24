@@ -850,59 +850,47 @@ impl TabViewer for PanelViewer<'_> {
                     Some(&mut *self.vector_edit),
                     &mut *self.doc,
                 );
-                // The material pick (R-A10 v1): Ctrl+Alt+click handed the
-                // shell (tile, UV) — read the ACTIVE channel's composite at
-                // that texel and apply it to the selected fill layer's
-                // Solid (keeping its channel target + projection + mask,
-                // through the same journalable SetFill the panel uses).
-                if let Some((tile, uv)) = self.uv_view.take_pick() {
-                    let picked = self.paint.as_deref_mut().and_then(|paint| {
-                        let channel = paint.active_channel().to_owned();
-                        let buf = paint.read_composite(tile, &channel)?;
-                        let x = (uv[0].clamp(0.0, 1.0) * buf.width as f32) as u32;
-                        let y = (uv[1].clamp(0.0, 1.0) * buf.height as f32) as u32;
-                        let x = x.min(buf.width.saturating_sub(1));
-                        let y = y.min(buf.height.saturating_sub(1));
-                        // The buffer's row 0 is the texture's TOP row; UV y
-                        // grows upward — sample the mirrored row (the
-                        // inspector's own convention).
-                        let t = buf.texel(x, buf.height - 1 - y);
-                        Some([
-                            t[0] as f32 / 255.0,
-                            t[1] as f32 / 255.0,
-                            t[2] as f32 / 255.0,
-                            t[3] as f32 / 255.0,
-                        ])
-                    });
-                    if let (Some(color), Some(id)) =
-                        (picked, self.layer_gestures.selection.primary())
-                    {
-                        let current = self
-                            .doc
-                            .layers()
-                            .iter()
-                            .find(|l| l.id == id)
-                            .filter(|l| l.kind == umber_core::LayerKind::Fill)
-                            .and_then(|l| l.fill.clone());
-                        if let Some(mut edited) = current {
-                            edited.source = umber_mesh::FillSource::Solid { color };
-                            self.doc.run(umber_core::LayerCommand::set_fill(id, edited));
-                            log::info!("material pick: layer {id} <- {color:?}");
-                            // The visible confirmation (the toast), so the
-                            // pick reads as landed even when the layer row
-                            // sits off-screen.
-                            let hex = format!(
-                                "#{:02x}{:02x}{:02x}",
-                                (color[0] * 255.0) as u8,
-                                (color[1] * 255.0) as u8,
-                                (color[2] * 255.0) as u8
-                            );
-                            self.pick_notices.push(crate::i18n::tr_args(
-                                "uv.pick-applied",
-                                [("color", fluent::FluentValue::from(hex))],
-                            ));
-                        } else {
-                            log::info!("material pick ignored: layer {id} is not a fill layer");
+                // The material pick shares one production helper for the
+                // active-channel v1 and the grouped all-channel mode.
+                if let Some(pick) = self.uv_view.take_pick() {
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        match apply_material_pick(
+                            self.doc,
+                            paint,
+                            self.layer_gestures,
+                            pick.tile,
+                            pick.uv,
+                            pick.all_channels,
+                        ) {
+                            MaterialPickOutcome::Active { color } => {
+                                let id = self.layer_gestures.selection.primary().unwrap_or(0);
+                                log::info!("material pick: layer {id} <- {color:?}");
+                                let hex = format!(
+                                    "#{:02x}{:02x}{:02x}",
+                                    (color[0] * 255.0) as u8,
+                                    (color[1] * 255.0) as u8,
+                                    (color[2] * 255.0) as u8
+                                );
+                                self.pick_notices.push(crate::i18n::tr_args(
+                                    "uv.pick-applied",
+                                    [("color", fluent::FluentValue::from(hex))],
+                                ));
+                            }
+                            MaterialPickOutcome::All { ids } => {
+                                log::info!("all-channel material pick: created {ids:?}");
+                                self.pick_notices.push(crate::i18n::tr_args(
+                                    "uv.pick-applied-count",
+                                    [("count", fluent::FluentValue::from(ids.len()))],
+                                ));
+                            }
+                            MaterialPickOutcome::Failed { channel } => {
+                                log::warn!("all-channel material pick failed on {channel}");
+                                self.pick_notices.push(crate::i18n::tr_args(
+                                    "uv.pick-failed",
+                                    [("channel", fluent::FluentValue::from(channel))],
+                                ));
+                            }
+                            MaterialPickOutcome::Ignored => {}
                         }
                     }
                 }
@@ -7351,6 +7339,144 @@ fn layer_session_ops(outcome: &layers_panel::gestures::GestureOutcome) -> Vec<La
     ops
 }
 
+/// One material-pick result, consumed by the shell for notices and by the
+/// acceptance tests for exact channel/value behavior.
+#[derive(Debug, PartialEq)]
+enum MaterialPickOutcome {
+    Active { color: [f32; 4] },
+    All { ids: Vec<u64> },
+    Ignored,
+    Failed { channel: String },
+}
+
+/// Samples one premultiplied composite texel as straight linear RGBA.
+/// Per-channel dimensions and the inspector's mirrored-row convention are
+/// preserved; zero alpha always produces transparent black.
+fn material_texel(buf: &umber_brush::retouch::RgbaBuffer, uv: [f32; 2]) -> [f32; 4] {
+    let x = (uv[0].clamp(0.0, 1.0) * buf.width as f32) as u32;
+    let y = (uv[1].clamp(0.0, 1.0) * buf.height as f32) as u32;
+    let x = x.min(buf.width.saturating_sub(1));
+    let y = y.min(buf.height.saturating_sub(1));
+    let t = buf.texel(x, buf.height - 1 - y);
+    let alpha = t[3] as f32 / 255.0;
+    if alpha == 0.0 {
+        return [0.0; 4];
+    }
+    [
+        (t[0] as f32 / 255.0 / alpha).clamp(0.0, 1.0),
+        (t[1] as f32 / 255.0 / alpha).clamp(0.0, 1.0),
+        (t[2] as f32 / 255.0 / alpha).clamp(0.0, 1.0),
+        alpha,
+    ]
+}
+
+/// Applies one material pick. Active mode preserves v1; all-channel mode
+/// enumerates every materialized channel on the tile before delegating to
+/// the failure-atomic grouped creator.
+fn apply_material_pick(
+    doc: &mut document::Document,
+    paint: &mut paint_state::PaintState,
+    gestures: &mut layers_panel::gestures::GestureState,
+    tile: u16,
+    uv: [f32; 2],
+    all_channels: bool,
+) -> MaterialPickOutcome {
+    if all_channels {
+        let mut channels = std::collections::BTreeSet::new();
+        for (_, picked_tile, channel) in paint.planes_present() {
+            if picked_tile == tile {
+                channels.insert(channel);
+            }
+        }
+        let mut ordered = Vec::new();
+        if channels.remove(paint_state::BASE_COLOR_CHANNEL) {
+            ordered.push(paint_state::BASE_COLOR_CHANNEL.to_string());
+        }
+        ordered.extend(channels);
+        let outcome = apply_all_channels_pick_with(doc, gestures, uv, &ordered, |channel| {
+            paint.read_composite(tile, channel)
+        });
+        if let MaterialPickOutcome::All { ref ids } = outcome {
+            if let Some(id) = ids.last() {
+                paint.set_active_target(paint_state::PlaneOwner::Layer(*id));
+            }
+        }
+        return outcome;
+    }
+
+    let channel = paint.active_channel().to_owned();
+    let Some(buf) = paint.read_composite(tile, &channel) else {
+        return MaterialPickOutcome::Ignored;
+    };
+    let color = material_texel(&buf, uv);
+    let Some(id) = gestures.selection.primary() else {
+        return MaterialPickOutcome::Ignored;
+    };
+    let Some(mut edited) = doc
+        .layers()
+        .iter()
+        .find(|layer| layer.id == id)
+        .filter(|layer| layer.kind == umber_core::LayerKind::Fill)
+        .and_then(|layer| layer.fill.clone())
+    else {
+        log::info!("material pick ignored: layer {id} is not a fill layer");
+        return MaterialPickOutcome::Ignored;
+    };
+    edited.source = umber_mesh::FillSource::Solid { color };
+    doc.run(umber_core::LayerCommand::set_fill(id, edited));
+    MaterialPickOutcome::Active { color }
+}
+
+/// Applies an all-channel pick through an injectable reader. Every read is
+/// preflighted before any document mutation, so a failure is atomic.
+fn apply_all_channels_pick_with(
+    doc: &mut document::Document,
+    gestures: &mut layers_panel::gestures::GestureState,
+    uv: [f32; 2],
+    channels: &[String],
+    mut read: impl FnMut(&str) -> Option<umber_brush::retouch::RgbaBuffer>,
+) -> MaterialPickOutcome {
+    if channels.is_empty() {
+        return MaterialPickOutcome::Ignored;
+    }
+    let mut samples = Vec::with_capacity(channels.len());
+    for channel in channels {
+        let Some(buf) = read(channel) else {
+            return MaterialPickOutcome::Failed {
+                channel: channel.clone(),
+            };
+        };
+        samples.push((channel.clone(), material_texel(&buf, uv)));
+    }
+    let mut ids = Vec::with_capacity(samples.len());
+    doc.run_grouped(history_panel::HistoryKind::AddFill, |doc| {
+        for (channel, color) in &samples {
+            let n = doc.layers().len() + 1;
+            let name = document::NewLayer::Fill.default_name(n);
+            doc.run(umber_core::LayerCommand::add(
+                name,
+                umber_core::LayerKind::Fill,
+            ));
+            let Some(id) = doc.layers().last().map(|layer| layer.id) else {
+                continue;
+            };
+            doc.run(umber_core::LayerCommand::set_fill(
+                id,
+                umber_mesh::FillParams {
+                    source: umber_mesh::FillSource::Solid { color: *color },
+                    channel: channel.clone(),
+                    ..Default::default()
+                },
+            ));
+            ids.push(id);
+        }
+    });
+    if let Some(id) = ids.last() {
+        gestures.selection.set_single(*id);
+    }
+    MaterialPickOutcome::All { ids }
+}
+
 /// Runs [`layer_session_ops`]' steps on the paint session.
 fn apply_layer_session_ops(paint: &mut paint_state::PaintState, ops: &[LayerSessionOp]) {
     for op in ops {
@@ -8768,6 +8894,112 @@ mod channel_manage_tests {
     /// stranded plane folding onto the new name) leaves BOTH untouched,
     /// because core ran on a clone and the clone is committed last.
     #[test]
+    fn material_pick_unpremultiplies_samples() {
+        let buf = umber_brush::retouch::RgbaBuffer::new(1, 1, vec![64, 32, 16, 128]).unwrap();
+        let got = super::material_texel(&buf, [0.5, 0.5]);
+        assert!((got[0] - 0.5).abs() < 1e-5, "{got:?}");
+        assert!((got[1] - 0.25).abs() < 1e-5, "{got:?}");
+        assert!((got[2] - 0.125).abs() < 1e-5, "{got:?}");
+        assert!((got[3] - 128.0 / 255.0).abs() < 1e-5, "{got:?}");
+        let transparent =
+            umber_brush::retouch::RgbaBuffer::new(1, 1, vec![255, 128, 64, 0]).unwrap();
+        assert_eq!(super::material_texel(&transparent, [0.5, 0.5]), [0.0; 4]);
+    }
+
+    #[test]
+    fn material_pick_failed_second_read_is_atomic() {
+        let mut doc = document::Document::default();
+        let mut gestures = layers_panel::gestures::GestureState::default();
+        let channels = vec!["baseColor".to_string(), "roughness".to_string()];
+        let outcome = super::apply_all_channels_pick_with(
+            &mut doc,
+            &mut gestures,
+            [0.5, 0.5],
+            &channels,
+            |channel| {
+                (channel == "baseColor").then(|| {
+                    umber_brush::retouch::RgbaBuffer::new(1, 1, vec![255, 0, 0, 255]).unwrap()
+                })
+            },
+        );
+        assert_eq!(
+            outcome,
+            super::MaterialPickOutcome::Failed {
+                channel: "roughness".to_string()
+            }
+        );
+        assert!(doc.layers().is_empty());
+        assert_eq!(doc.history.len(), 0);
+        assert!(doc.session_history.is_empty());
+        assert_eq!(gestures.selection.primary(), None);
+    }
+
+    #[test]
+    fn material_pick_all_channels_groups_values_and_undo() {
+        let mut doc = document::Document::default();
+        let mut gestures = layers_panel::gestures::GestureState::default();
+        let channels = vec![
+            "baseColor".to_string(),
+            "custom".to_string(),
+            "roughness".to_string(),
+        ];
+        let outcome = super::apply_all_channels_pick_with(
+            &mut doc,
+            &mut gestures,
+            [0.25, 0.75],
+            &channels,
+            |channel| match channel {
+                "baseColor" => {
+                    let mut data = vec![0u8; 4 * 4 * 4];
+                    data[7] = 128;
+                    data[8 * 4 + 2] = 255;
+                    umber_brush::retouch::RgbaBuffer::new(4, 4, data)
+                }
+                "roughness" => {
+                    let mut data = vec![0u8; 2 * 2 * 4];
+                    data[1] = 96;
+                    data[3] = 255;
+                    umber_brush::retouch::RgbaBuffer::new(2, 2, data)
+                }
+                "custom" => umber_brush::retouch::RgbaBuffer::new(1, 1, vec![1, 2, 3, 4]),
+                _ => None,
+            },
+        );
+        let super::MaterialPickOutcome::All { ids } = outcome else {
+            panic!("all-channel pick did not create layers: {outcome:?}");
+        };
+        assert_eq!(ids.len(), 3);
+        assert_eq!(gestures.selection.primary(), ids.last().copied());
+        let layers = doc.layers();
+        assert_eq!(layers[0].fill.as_ref().unwrap().channel, "baseColor");
+        assert_eq!(layers[1].fill.as_ref().unwrap().channel, "custom");
+        assert_eq!(layers[2].fill.as_ref().unwrap().channel, "roughness");
+        assert_eq!(
+            layers[0].fill.as_ref().unwrap().projection,
+            umber_mesh::FillProjection::Uv
+        );
+        assert!(layers
+            .iter()
+            .all(|l| l.fill.as_ref().unwrap().mask.is_none()));
+        let color = |index: usize| match &layers[index].fill.as_ref().unwrap().source {
+            umber_mesh::FillSource::Solid { color } => *color,
+            other => panic!("picked layer {index} is not Solid: {other:?}"),
+        };
+        assert_eq!(color(0), [0.0, 0.0, 0.0, 128.0 / 255.0]);
+        assert!((color(1)[0] - 0.25).abs() < 1e-5);
+        assert!((color(1)[1] - 0.5).abs() < 1e-5);
+        assert!((color(1)[2] - 0.75).abs() < 1e-5);
+        assert_eq!(color(1)[3], 4.0 / 255.0);
+        assert_eq!(color(2), [0.0, 96.0 / 255.0, 0.0, 1.0]);
+        assert_eq!(doc.session_history.len(), 1, "one grouped history row");
+        assert!(doc.undo(), "one undo removes the whole picked set");
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo(), "one redo restores the whole picked set");
+        let restored: Vec<u64> = doc.layers().iter().map(|l| l.id).collect();
+        assert_eq!(restored, ids);
+    }
+
+    #[test]
     fn the_full_rename_moves_planes_and_a_paint_refusal_is_atomic() {
         let Some((device, queue)) = try_request_device() else {
             return;
@@ -8800,5 +9032,284 @@ mod channel_manage_tests {
             vec!["Sheen".to_string(), "gloss".to_string()],
             "the planes did not move"
         );
+    }
+}
+
+#[cfg(test)]
+mod material_pick_tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    struct State {
+        uv: UvView,
+        paint: paint_state::PaintState,
+        doc: document::Document,
+        gestures: layers_panel::gestures::GestureState,
+        polygon: fill_layer::PolygonFillTool,
+        path: path_tool::PaintPathTool,
+        vector: vector_edit::VectorEditTool,
+        mesh: umber_mesh::MeshData,
+        gpu: umber_gpu::GpuContext,
+        outcomes: Vec<MaterialPickOutcome>,
+        base_expected: [f32; 4],
+        custom_expected: [f32; 4],
+    }
+
+    fn try_request_gpu() -> Option<umber_gpu::GpuContext> {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        if !adapter.features().contains(features) {
+            return None;
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .ok()?;
+        Some(umber_gpu::GpuContext::new(
+            adapter,
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        ))
+    }
+
+    fn source_snapshot(displayed: &[(u16, String)]) -> paint_state::CompositeSnapshot {
+        paint_state::CompositeSnapshot {
+            layers: vec![
+                paint_state::SnapshotLayer {
+                    geometry: Default::default(),
+                    owner: paint_state::PlaneOwner::Base,
+                    layer_id: None,
+                    kind: paint_state::SnapshotLayerKind::Paint,
+                    blend: umber_core::BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+                paint_state::SnapshotLayer {
+                    geometry: Default::default(),
+                    owner: paint_state::PlaneOwner::Layer(0),
+                    layer_id: Some(0),
+                    kind: paint_state::SnapshotLayerKind::Paint,
+                    blend: umber_core::BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+            ],
+            base_visible: true,
+            displayed: displayed.to_vec(),
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+        }
+    }
+
+    impl State {
+        fn new() -> Option<Self> {
+            i18n::init();
+            let gpu = try_request_gpu()?;
+            let mut paint =
+                paint_state::PaintState::with_target_size(gpu.device.clone(), gpu.queue.clone(), 4)
+                    .expect("paint builds");
+            let base_expected = material_texel(
+                &paint
+                    .read_composite(1001, paint_state::BASE_COLOR_CHANNEL)
+                    .expect("base composite"),
+                [0.5, 0.5],
+            );
+            let mut doc = document::Document::default();
+            doc.run(umber_core::LayerCommand::add(
+                "Source",
+                umber_core::LayerKind::Paint,
+            ));
+            paint.resize_channel(paint_state::DEFAULT_TEXTURE_SET, "custom", 2, 2);
+            paint
+                .publish_plane(
+                    paint_state::PlaneOwner::Layer(0),
+                    1001,
+                    "custom",
+                    2,
+                    2,
+                    [[128, 64, 32, 255]; 4].concat(),
+                )
+                .expect("layer-owned custom plane");
+            paint.flush_composite(&source_snapshot(&[(1001, "custom".to_string())]));
+            let custom_expected = material_texel(
+                &paint
+                    .read_composite(1001, "custom")
+                    .expect("custom composite"),
+                [0.5, 0.5],
+            );
+            let mut polygon = fill_layer::PolygonFillTool::default();
+            polygon.set_armed(true);
+            let mut path = path_tool::PaintPathTool::default();
+            path.set_armed(true);
+            let mut vector = vector_edit::VectorEditTool::default();
+            vector.adopt(Some((0, None)));
+            let mut symmetry = umber_brush::SymmetrySettings::default();
+            symmetry.mirror.enabled = true;
+            paint.sync_symmetry(&mut symmetry);
+            Some(Self {
+                uv: UvView::default(),
+                paint,
+                doc,
+                gestures: layers_panel::gestures::GestureState::default(),
+                polygon,
+                path,
+                vector,
+                mesh: umber_mesh::MeshData {
+                    positions: vec![
+                        [-1.0, -1.0, 0.0],
+                        [1.0, -1.0, 0.0],
+                        [1.0, 1.0, 0.0],
+                        [-1.0, 1.0, 0.0],
+                    ],
+                    normals: vec![[0.0, 0.0, 1.0]; 4],
+                    uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    material_names: vec![],
+                    triangle_materials: Vec::new(),
+                },
+                gpu,
+                outcomes: Vec::new(),
+                base_expected,
+                custom_expected,
+            })
+        }
+    }
+
+    fn harness(state: State) -> Harness<'static, State> {
+        Harness::<State>::builder()
+            .with_size(egui::vec2(512.0, 512.0))
+            .build_ui_state(
+                |ui, s: &mut State| {
+                    s.uv.ui(
+                        ui,
+                        Some(&s.mesh),
+                        &s.gpu,
+                        Some(&mut s.paint),
+                        None,
+                        Some(&mut s.polygon),
+                        Some(&mut s.path),
+                        Some(&mut s.vector),
+                        &mut s.doc,
+                    );
+                    if let Some(pick) = s.uv.take_pick() {
+                        let outcome = apply_material_pick(
+                            &mut s.doc,
+                            &mut s.paint,
+                            &mut s.gestures,
+                            pick.tile,
+                            pick.uv,
+                            pick.all_channels,
+                        );
+                        s.outcomes.push(outcome);
+                    }
+                },
+                state,
+            )
+    }
+
+    #[test]
+    fn material_pick_footer_toggle_is_live() {
+        let Some(mut state) = State::new() else {
+            eprintln!("skipping: no suitable wgpu adapter");
+            return;
+        };
+        state.path.set_armed(false);
+        state.vector.clear();
+        let mut symmetry = umber_brush::SymmetrySettings::default();
+        state.paint.sync_symmetry(&mut symmetry);
+        let mut h = harness(state);
+        h.run();
+        h.get_by_label(&tr("uv.all-channels")).click();
+        h.run();
+        assert!(h.state().uv.all_channels, "footer toggle is live");
+    }
+
+    #[test]
+    fn material_pick_uv_gesture_creates_grouped_fills_without_lasso_or_stroke() {
+        let Some(mut state) = State::new() else {
+            eprintln!("skipping: no suitable wgpu adapter");
+            return;
+        };
+        state.uv.all_channels = true;
+        let mut h = harness(state);
+        h.run();
+        assert!(h.state().uv.all_channels, "all-channel mode is active");
+        h.state_mut().paint.begin_stroke(egui::pos2(0.5, 0.5));
+        assert!(h.state().paint.is_stroking());
+
+        let modifiers = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        let at = egui::pos2(256.0, 256.0);
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        });
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers,
+        });
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run();
+
+        let s = h.state();
+        assert!(!s.paint.is_stroking(), "the pick ended the stroke");
+        assert_eq!(s.polygon.point_count(), 0, "no lasso point leaked");
+        assert_eq!(s.path.point_count(), 0, "no path point leaked");
+        assert!(
+            s.vector.shape().anchors.is_empty(),
+            "no vector anchor leaked"
+        );
+        assert_eq!(s.outcomes.len(), 1, "one pick was applied");
+        let [MaterialPickOutcome::All { ref ids }] = s.outcomes.as_slice() else {
+            panic!("unexpected outcome: {:?}", s.outcomes);
+        };
+        assert_eq!(ids.len(), 2, "baseColor + layer-owned custom");
+        assert_eq!(s.doc.layers().len(), 3, "source plus two new fills");
+        assert_eq!(s.doc.layers()[0].kind, umber_core::LayerKind::Paint);
+        assert_eq!(s.gestures.selection.primary(), ids.last().copied());
+        assert_eq!(
+            s.paint.active_target(),
+            paint_state::PlaneOwner::Layer(*ids.last().unwrap())
+        );
+        let fills: Vec<&umber_mesh::FillParams> = s.doc.layers()[1..]
+            .iter()
+            .map(|layer| layer.fill.as_ref().expect("picked fill params"))
+            .collect();
+        assert_eq!(fills[0].channel, "baseColor");
+        assert_eq!(fills[1].channel, "custom");
+        assert!(fills.iter().all(|f| f.mask.is_none()));
+        assert!(fills
+            .iter()
+            .all(|f| f.projection == umber_mesh::FillProjection::Uv));
+        for (params, expected) in fills.iter().zip([s.base_expected, s.custom_expected]) {
+            let umber_mesh::FillSource::Solid { color } = &params.source else {
+                panic!("picked fill is not Solid");
+            };
+            assert_eq!(*color, expected);
+        }
+
+        let ids = ids.clone();
+        let doc = &mut h.state_mut().doc;
+        assert!(doc.undo(), "one undo removes the whole grouped pick");
+        assert_eq!(doc.layers().len(), 1, "only the source remains");
+        assert!(doc.redo(), "one redo restores both picked fills");
+        let restored: Vec<u64> = doc.layers()[1..].iter().map(|layer| layer.id).collect();
+        assert_eq!(restored, ids);
     }
 }

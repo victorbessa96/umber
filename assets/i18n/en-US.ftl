@@ -900,7 +900,10 @@ uv =
     .no-mesh = no mesh loaded
     .mask-mode = MASK MODE (X to exit)
     .isolate = Channel
+    .all-channels = All channels
     .pick-applied = Picked { $color } into the fill layer
+    .pick-applied-count = Picked { $count } channels into new fill layers
+    .pick-failed = Material pick failed: could not read { $channel }
     .vector-edit-hint = Vector: click add · right-click delete · C close · Shift/Alt collapsed handles
 
 ## Paint path tools (§2 P1 row)
