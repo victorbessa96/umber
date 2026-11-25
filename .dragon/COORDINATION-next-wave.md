@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** late Assets mesh acceptance coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-assets-mesh-coverage`, on committed brief `dd1510b3fb1f` and queue row 620. Base `bc3d7fc98ae6` was clean and origin-equal, with no live sibling or prior lock. Mesh-specific no-match assertion and exact bundled/exe/extra ordering with built-in alias suppression. No production behavior changes. Independent review, report, safe-push, and origin verify.
+**Updated 2026-11-25:** late Assets mesh acceptance coverage is implemented at `35f12d3256c199819fca7dfce058f4c74fa6058f`, on brief `dd1510b3fb1f` and claim `b66db4b017ff`; queue row 621 and report `docs/loop/kill-reports/2026-11-25-umber-assets-mesh-coverage.md`. Mesh no-match is isolated below the Meshes header, and directory ordering is exact bundled→exe→extra with built-in aliases. No production behavior changes. Mesh filter is 32/0, strict app clippy is clean, and independent review `deleg_aa4e5245` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-assets-mesh-coverage`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
