@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** OBJ material/MTL export is implemented at `d874fa546caef0a6c3cfd3d3d0cf5f61b293dd07`, on brief `3c83c23ca533` and claim `d489da63d83c`; queue row 609 and report `docs/loop/kill-reports/2026-11-24-umber-obj-mtl.md`. Passthrough MTL bindings, packed-channel refusal, canonical/symlink containment, concrete per-tile pairs, and rollback are wired through the app, CLI, batch, and agent. R1's per-set suffix and URI/drive findings were fixed; full app is 1,280/0, export 110/0, CLI 159/0, and R2 `deleg_02f5c976` returned SHIP with zero findings. Fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. EyeDepth is next. This status-doc commit releases `razul-obj-mtl`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** EyeDepth visibility contract is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-eye-depth`, on committed brief `078ef410d0ed` and queue row 610. Base `b44ca50473cc` was clean and origin-equal, with no live sibling or prior lock. Name the nearest-hit epsilon, pin nearest visible-surface selection and no-hit/no-dab behavior, and prove CPU hit selection matches actual GPU paint readback. No duplicate depth buffer, renderer change, new toggle, second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
