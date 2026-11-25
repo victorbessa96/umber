@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-All code-ready lanes are landed and origin-verified. The late Assets mesh acceptance coverage is implemented at `35f12d3256c199819fca7dfce058f4c74fa6058f` with independent SHIP and a 32-test filter. Origin read-back reached `07321ac3f86b307fd4d64ab7255dea9c66ae5cbb`. Only genuine human/product/platform gates remain; the complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+The late OBJ writer failure coverage is implemented at `adcf99d7da0e678bbf87e382d29d8e661f087ca9`, with brief `93f27b70` and claim `2e3b86be`. Writer-level ragged no-directory assertions and the create_dir_all failure branch are pinned with no production behavior changes. OBJ filter is 9/0, strict export clippy is clean, and replacement review `deleg_c1270888` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
