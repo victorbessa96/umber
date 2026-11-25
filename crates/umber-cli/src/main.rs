@@ -55,7 +55,7 @@ fn main() -> Result<()> {
             println!("commands: inspect <mesh-file>");
             println!("          bake-ao <mesh-file> <out.png> [--size N] [--rays N] [--dilate N] [--margin extend|adjacent]");
             println!("          bake-all <mesh-file> <out-dir> [--size N] [--rays N] [--dilate N] [--margin extend|adjacent]");
-            println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda]");
+            println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda] [--obj]");
             println!("          batch <recipe.json>");
             println!("          agent   (JSONL steps on stdin, one JSON result line each on stdout)");
             println!("          mcp     [--read-root DIR] [--write-root DIR]   (MCP server on stdio, tools over the agent session)");
@@ -238,6 +238,15 @@ impl Default for BakeFlags {
     }
 }
 
+/// Optional mesh-document outputs for `export` and its batch/agent forms.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExportDocFlags {
+    /// Write `<textureSet>.usda` with a UsdShade binding.
+    pub usda: bool,
+    /// Write OBJ + MTL with passthrough material/texture references.
+    pub obj_mtl: bool,
+}
+
 /// Parses a `--margin` value: `extend` (Blender's Extend, the default)
 /// or `adjacent` (Adjacent Faces). Anything else is an error naming the
 /// flag and the accepted values.
@@ -290,8 +299,8 @@ fn parse_bake_flags(args: &[String], start: usize) -> Result<BakeFlags> {
             }
             // export_cmd parses --preset/--tile itself; skip them (value too).
             "--preset" | "--tile" => i += 2,
-            // export_cmd's value-less --usda toggle.
-            "--usda" => i += 1,
+            // export_cmd's value-less document toggles.
+            "--usda" | "--obj" => i += 1,
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
     }
@@ -867,13 +876,13 @@ fn parse_tile(value: &str) -> Result<u16> {
 }
 
 /// `export <mesh> <out-dir> --preset <name> [--size N] [--rays N]
-/// [--tile UDIM]... [--usda]` — runs the full pipeline headless: bakes the P0
-/// maps, packs them through the chosen export preset, writes the named
-/// outputs.
+/// [--tile UDIM]... [--usda] [--obj]` — runs the full pipeline headless:
+/// bakes the P0 maps, packs them through the chosen export preset, and
+/// writes the named outputs.
 ///
-/// With `--usda`, `<textureSet>.usda` is written last: the whole mesh plus
-/// a UsdShade Material/Shader network binding the written textures to the
-/// OpenPBR surface (`umber_export::usd`).
+/// With `--usda`, `<textureSet>.usda` is written with a UsdShade binding.
+/// With `--obj`, one whole-mesh OBJ/MTL pair is written per exported tile
+/// with passthrough texture references (`umber_export::obj`).
 ///
 /// UDIM (wave-5 slice 5): the export runs once per tile. `--tile` is
 /// repeatable; without it, every tile the mesh's geometry occupies
@@ -885,13 +894,14 @@ fn parse_tile(value: &str) -> Result<u16> {
 /// `$udim` get `_<tile>` before the extension so tiles never collide.
 fn export_cmd(args: &[String]) -> Result<()> {
     let usage =
-        "usage: umber-cli export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda]";
+        "usage: umber-cli export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda] [--obj]";
     let mesh_path = args.first().ok_or_else(|| anyhow::anyhow!("{usage}"))?;
     let out_dir = args.get(1).ok_or_else(|| anyhow::anyhow!("{usage}"))?;
 
     let mut preset_name = String::new();
     let mut requested_tiles = Vec::new();
     let mut usda = false;
+    let mut obj_mtl = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -913,6 +923,10 @@ fn export_cmd(args: &[String]) -> Result<()> {
                 usda = true;
                 i += 1;
             }
+            "--obj" => {
+                obj_mtl = true;
+                i += 1;
+            }
             "--size" | "--rays" => i += 2, // parsed by BakeFlags below
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
@@ -925,7 +939,7 @@ fn export_cmd(args: &[String]) -> Result<()> {
         &preset_name,
         &flags,
         &requested_tiles,
-        usda,
+        ExportDocFlags { usda, obj_mtl },
         &mut print_skipped,
     )?;
     for path in &written {
@@ -976,7 +990,7 @@ fn run_export(
     preset_name: &str,
     flags: &BakeFlags,
     requested_tiles: &[u16],
-    usda: bool,
+    documents: ExportDocFlags,
     on_skip: &mut dyn FnMut(&str),
 ) -> Result<(Vec<PathBuf>, Vec<u16>)> {
     // Fail fast on a bad preset, before the mesh load.
@@ -986,7 +1000,7 @@ fn run_export(
         preset_name,
         flags,
         requested_tiles,
-        usda,
+        documents,
         // The batch path never overrides: the mesh-derived set name,
         // byte-identical to the pre-override behavior.
         set_override: None,
@@ -1005,7 +1019,7 @@ pub struct ExportAsk<'a> {
     preset_name: &'a str,
     flags: &'a BakeFlags,
     requested_tiles: &'a [u16],
-    usda: bool,
+    documents: ExportDocFlags,
     /// The texture-set name override: `Some(name)` names every output
     /// after `name` instead of the mesh-derived set — the agent
     /// session's project rule (bake's v0 contract, unified). The batch
@@ -1021,7 +1035,8 @@ fn export_mesh(
     on_skip: &mut dyn FnMut(&str),
 ) -> Result<(Vec<PathBuf>, Vec<u16>)> {
     let mut full_preset = preset_by_name(ask.preset_name)?;
-    full_preset.usda |= ask.usda;
+    full_preset.usda |= ask.documents.usda;
+    full_preset.obj_mtl |= ask.documents.obj_mtl;
     let ctx = bake_context()?;
     // The project rule (bake's v0 contract, unified): an explicit
     // override names the outputs; none keeps the mesh-derived name
@@ -1101,6 +1116,7 @@ fn export_mesh(
         outputs: filtered_outputs,
         materialx: full_preset.materialx,
         usda: full_preset.usda,
+        obj_mtl: full_preset.obj_mtl,
     };
     if preset.outputs.is_empty() {
         let preset_name = ask.preset_name;
@@ -1165,6 +1181,28 @@ fn export_mesh(
         written.push(umber_export::usd::write_usda(
             out_dir, &set_name, &mesh_view, &textures,
         )?);
+    }
+    if preset.obj_mtl {
+        let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
+        for &tile in &tiles {
+            let textures = umber_export::usd::usd_textures(&preset, |output| {
+                umber_export::obj::obj_file_for_output(output, &sources, tile_names.then_some(tile))
+            });
+            let mesh_view = umber_export::usd::UsdMeshView {
+                positions: &mesh.positions,
+                normals: &mesh.normals,
+                uvs: &mesh.uvs,
+                indices: &mesh.indices,
+            };
+            let (obj, mtl) = umber_export::obj::write_obj_with_mtl(
+                out_dir,
+                &set_name,
+                &mesh_view,
+                &textures,
+                tile_names.then_some(tile),
+            )?;
+            written.extend([obj, mtl]);
+        }
     }
     Ok((written, tiles))
 }
@@ -1256,13 +1294,15 @@ mod tests {
     }
 
     #[test]
-    fn bake_flag_parser_skips_the_tile_flag() {
+    fn bake_flag_parser_skips_export_document_flags() {
         // export_cmd hands its whole arg list to parse_bake_flags, which
-        // must not reject --tile as unknown.
-        let args: Vec<String> = ["mesh.obj", "out", "--tile", "1002", "--size", "64"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // must not reject tile or the value-less document toggles.
+        let args: Vec<String> = [
+            "mesh.obj", "out", "--tile", "1002", "--size", "64", "--usda", "--obj",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let flags = parse_bake_flags(&args, 2).expect("--tile is skipped");
         assert_eq!(flags.size, 64);
     }

@@ -163,6 +163,11 @@ pub struct ExportPreset {
     /// off, like [`Self::materialx`].
     #[serde(default)]
     pub usda: bool,
+    /// Also write `<textureSet>.obj` + `<textureSet>.mtl` with
+    /// passthrough material/texture references (`crate::obj`). Absent in
+    /// older preset files → off, like [`Self::usda`].
+    #[serde(default)]
+    pub obj_mtl: bool,
 }
 
 /// Export-configuration errors.
@@ -205,6 +210,7 @@ impl ExportPreset {
             name: "glTF metal-rough".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_baseColor.png".into(),
@@ -269,6 +275,7 @@ impl ExportPreset {
             name: "Unreal ORM".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_basecolor.png".into(),
@@ -323,6 +330,7 @@ impl ExportPreset {
             name: "Unity HDRP/URP".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_BaseMap.png".into(),
@@ -373,6 +381,7 @@ impl ExportPreset {
             name: "Blender Principled".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![
                 passthrough(MapKind::BaseColor, "$textureSet_basecolor.png"),
                 passthrough(MapKind::Roughness, "$textureSet_roughness.png"),
@@ -622,7 +631,8 @@ mod tests {
         assert_eq!(preset.outputs[0].maps[0].0, MapKind::BaseColor);
         // Pre-MaterialX preset files (no `materialx` key) parse with it off.
         assert!(!preset.materialx);
-        // Pre-USD preset files (no `usda` key) parse with it off too.
+        // Pre-USD/OBJ preset files (no `usda`/`obj_mtl` keys) parse with them off too.
         assert!(!preset.usda);
+        assert!(!preset.obj_mtl);
     }
 }

@@ -1,14 +1,20 @@
-//! Wavefront OBJ geometry export — deterministic triangle meshes.
+//! Wavefront OBJ geometry and material export — deterministic triangle meshes.
 //!
 //! The public API mirrors the borrowed [`crate::usd::UsdMeshView`] shape so
 //! the export crate remains mesh-free. Parallel attributes use the same
 //! one-based index at each corner, matching `tobj`'s `single_index=true`
-//! import contract. GLB, material/MTL, and texture references are out of scope.
+//! import contract. The material entry points consume the driver's existing
+//! [`crate::usd::UsdTexture`] walk and emit one MTL material with passthrough
+//! texture references; packed channels are refused rather than reinterpreted.
 
 use std::path::{Path, PathBuf};
 
-use crate::driver::ExportError;
-use crate::usd::UsdMeshView;
+use umber_graph::mtlx_doc::UDIM_TOKEN;
+
+use crate::driver::{ExportError, TokenSources};
+use crate::presets::OutputSpec;
+use crate::tiled_template;
+use crate::usd::{UsdMeshView, UsdTexture};
 
 /// Borrowed geometry accepted by the OBJ writer.
 pub type ObjMeshView<'a> = UsdMeshView<'a>;
@@ -166,6 +172,279 @@ pub fn write_obj(
     Ok(path)
 }
 
+/// Maximum MTL document size, matched to the OBJ text budget.
+pub const MAX_MTL_EXPORT_BYTES: u64 = MAX_OBJ_EXPORT_BYTES;
+
+fn write_error(message: impl Into<String>) -> ExportError {
+    ExportError::Write(format!("obj: {}", message.into()))
+}
+
+fn object_stem(asset: &str, tile: Option<u16>) -> Result<String, ExportError> {
+    let mut name = asset.to_owned();
+    if let Some(tile) = tile {
+        name.push('_');
+        name.push_str(&tile.to_string());
+    }
+    if obj_name_len(&name) > MAX_OBJ_NAME_BYTES {
+        return Err(write_error(format!(
+            "asset name exceeds {MAX_OBJ_NAME_BYTES} bytes after sanitization"
+        )));
+    }
+    Ok(obj_name(&name))
+}
+
+fn validate_texture_reference(file: &str) -> Result<(), ExportError> {
+    if file.is_empty() {
+        return Err(write_error("texture reference is empty"));
+    }
+    if file.contains(['\n', '\r', '\0']) {
+        return Err(write_error(format!(
+            "texture file {file:?} contains a line break or NUL"
+        )));
+    }
+    if file.contains(UDIM_TOKEN) {
+        return Err(write_error(
+            "OBJ/MTL texture references must use concrete tile names",
+        ));
+    }
+    if file.contains("://") {
+        return Err(write_error(format!(
+            "texture file {file:?} must be a relative path, not a URI"
+        )));
+    }
+    if let Some((prefix, _)) = file.split_once(':') {
+        if !prefix.is_empty()
+            && prefix
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        {
+            return Err(write_error(format!(
+                "texture file {file:?} has a URI scheme or Windows drive prefix"
+            )));
+        }
+    }
+    if file.contains('\\') {
+        return Err(write_error(format!(
+            "texture file {file:?} must use forward slashes"
+        )));
+    }
+    let path = Path::new(file);
+    if path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(write_error(format!(
+            "texture file {file:?} escapes the export directory"
+        )));
+    }
+    Ok(())
+}
+
+fn mtl_key(input: &str) -> Option<&'static str> {
+    match input {
+        "base_color" => Some("map_Kd"),
+        "geometry_normal" => Some("map_Bump"),
+        "specular_roughness" => Some("map_Pr"),
+        "base_metalness" => Some("map_Pm"),
+        "emission_color" => Some("map_Ke"),
+        "geometry_opacity" => Some("map_d"),
+        _ => None,
+    }
+}
+
+/// Serialize one MTL material from the driver's existing texture walk.
+///
+/// Only passthrough references are representable honestly: `rgb` for a
+/// color/vector image and `r` for a scalar image. Packed channels require a
+/// separate-map preset and are refused rather than assigned invented syntax.
+pub fn to_mtl_document(
+    asset: &str,
+    textures: &[UsdTexture],
+    tile: Option<u16>,
+) -> Result<String, ExportError> {
+    let object = object_stem(asset, tile)?;
+    let mut bound = 1024u64 + 4 * object.len() as u64;
+    for texture in textures {
+        validate_texture_reference(&texture.file)?;
+        bound = bound.saturating_add(64 + texture.file.len() as u64);
+    }
+    if bound > MAX_MTL_EXPORT_BYTES {
+        return Err(ExportError::TooLarge {
+            size: bound,
+            cap: MAX_MTL_EXPORT_BYTES,
+        });
+    }
+
+    let mut out = String::new();
+    out.push_str("# Umber MTL export\n");
+    out.push_str(&format!("# asset {object}\n"));
+    out.push_str(&format!("newmtl {object}\nKd 1 1 1\nillum 2\n"));
+    for texture in textures {
+        let Some(key) = mtl_key(texture.input) else {
+            return Err(write_error(format!(
+                "unsupported MTL input {:?}",
+                texture.input
+            )));
+        };
+        if texture.output != "rgb" && texture.output != "r" {
+            return Err(write_error(format!(
+                "packed channel {:?} for {} requires a separate-map preset",
+                texture.output, texture.file
+            )));
+        }
+        out.push_str(&format!("{key} {}\n", texture.file));
+    }
+    if out.len() as u64 > MAX_MTL_EXPORT_BYTES {
+        return Err(ExportError::TooLarge {
+            size: out.len() as u64,
+            cap: MAX_MTL_EXPORT_BYTES,
+        });
+    }
+    Ok(out)
+}
+
+/// Serialize OBJ geometry with its matching `mtllib` and `usemtl` binding.
+pub fn to_obj_document_with_material(
+    asset: &str,
+    mesh: &ObjMeshView<'_>,
+    textures: &[UsdTexture],
+    tile: Option<u16>,
+) -> Result<String, ExportError> {
+    let object = object_stem(asset, tile)?;
+    let _ = to_mtl_document(asset, textures, tile)?;
+    let mut doc = to_obj_document(asset, mesh)?;
+    let marker = format!("o {}\n", obj_name(asset));
+    let binding = format!("mtllib {object}.mtl\n{marker}usemtl {object}\n");
+    doc = doc.replacen(&marker, &binding, 1);
+    if doc.len() as u64 > MAX_OBJ_EXPORT_BYTES {
+        return Err(ExportError::TooLarge {
+            size: doc.len() as u64,
+            cap: MAX_OBJ_EXPORT_BYTES,
+        });
+    }
+    Ok(doc)
+}
+
+/// Resolve one output to the concrete filename the tiled driver wrote.
+pub fn obj_file_for_output(
+    output: &OutputSpec,
+    sources: &TokenSources<'_>,
+    tile: Option<u16>,
+) -> String {
+    if let Some(tile) = tile {
+        let udim = tile.to_string();
+        let sources = TokenSources {
+            udim: &udim,
+            ..*sources
+        };
+        sources.expand_output_from(output, &tiled_template(&output.filename))
+    } else {
+        sources.expand_output(output)
+    }
+}
+
+/// Write an OBJ/MTL pair after validating every texture reference exists.
+/// MTL is written first; failures restore its previous bytes or remove a
+/// newly-created file, so an OBJ failure never leaves a changed MTL behind.
+pub fn write_obj_with_mtl(
+    out_dir: &Path,
+    asset: &str,
+    mesh: &ObjMeshView<'_>,
+    textures: &[UsdTexture],
+    tile: Option<u16>,
+) -> Result<(PathBuf, PathBuf), ExportError> {
+    let object = object_stem(asset, tile)?;
+    let mtl_doc = to_mtl_document(asset, textures, tile)?;
+    let obj_doc = to_obj_document_with_material(asset, mesh, textures, tile)?;
+    let root = if textures.is_empty() {
+        None
+    } else {
+        Some(std::fs::canonicalize(out_dir).map_err(|e| write_error(e.to_string()))?)
+    };
+    for texture in textures {
+        validate_texture_reference(&texture.file)?;
+        let path = root
+            .as_ref()
+            .expect("non-empty texture walk has a root")
+            .join(&texture.file);
+        let resolved = std::fs::canonicalize(&path).map_err(|_| {
+            write_error(format!(
+                "referenced texture {} does not exist",
+                path.display()
+            ))
+        })?;
+        let root = root.as_ref().expect("non-empty texture walk has a root");
+        if !resolved.starts_with(root) || !resolved.is_file() {
+            return Err(write_error(format!(
+                "referenced texture {} escapes the export directory",
+                path.display()
+            )));
+        }
+    }
+    std::fs::create_dir_all(out_dir).map_err(|e| write_error(e.to_string()))?;
+    let obj_path = out_dir.join(format!("{object}.obj"));
+    let mtl_path = out_dir.join(format!("{object}.mtl"));
+    if obj_path.is_dir() || mtl_path.is_dir() {
+        return Err(write_error(
+            "OBJ/MTL output path is an existing directory".to_owned(),
+        ));
+    }
+    let previous_mtl = match std::fs::read(&mtl_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(write_error(error.to_string())),
+    };
+    let restore_mtl = |path: &Path| {
+        if let Some(bytes) = &previous_mtl {
+            let _ = std::fs::write(path, bytes);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    };
+    if let Err(error) = std::fs::write(&mtl_path, mtl_doc) {
+        restore_mtl(&mtl_path);
+        return Err(write_error(error.to_string()));
+    }
+    let temp_obj = out_dir.join(format!(".{object}.obj.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&temp_obj);
+    if let Err(error) = std::fs::write(&temp_obj, obj_doc) {
+        let _ = std::fs::remove_file(&temp_obj);
+        restore_mtl(&mtl_path);
+        return Err(write_error(error.to_string()));
+    }
+    if obj_path.exists() {
+        let backup = out_dir.join(format!(".{object}.obj.bak-{}", std::process::id()));
+        let _ = std::fs::remove_file(&backup);
+        if let Err(error) = std::fs::rename(&obj_path, &backup) {
+            let _ = std::fs::remove_file(&temp_obj);
+            restore_mtl(&mtl_path);
+            return Err(write_error(error.to_string()));
+        }
+        if let Err(error) = std::fs::rename(&temp_obj, &obj_path) {
+            let _ = std::fs::rename(&backup, &obj_path);
+            let _ = std::fs::remove_file(&temp_obj);
+            restore_mtl(&mtl_path);
+            return Err(write_error(error.to_string()));
+        }
+        let _ = std::fs::remove_file(backup);
+    } else if let Err(error) = std::fs::rename(&temp_obj, &obj_path) {
+        let _ = std::fs::remove_file(&temp_obj);
+        restore_mtl(&mtl_path);
+        return Err(write_error(error.to_string()));
+    }
+    Ok((obj_path, mtl_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +588,196 @@ mod tests {
         ));
         assert!(dir.join("Sword.obj").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn texture(input: &'static str, output: &'static str, file: &str) -> UsdTexture {
+        UsdTexture {
+            file: file.to_owned(),
+            input,
+            input_type: if output == "rgb" { "color3" } else { "float" },
+            output,
+            source_colorspace: "raw",
+        }
+    }
+
+    fn write_texture(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), b"texture").unwrap();
+    }
+
+    #[test]
+    fn mtl_document_maps_every_supported_passthrough_input() {
+        let textures = vec![
+            texture("base_color", "rgb", "base.png"),
+            texture("geometry_normal", "rgb", "normal.png"),
+            texture("specular_roughness", "r", "rough.png"),
+            texture("base_metalness", "r", "metal.png"),
+            texture("emission_color", "rgb", "emission.png"),
+            texture("geometry_opacity", "r", "opacity.png"),
+        ];
+        let doc = to_mtl_document("Sword", &textures, None).unwrap();
+        for expected in [
+            "newmtl Sword",
+            "map_Kd base.png",
+            "map_Bump normal.png",
+            "map_Pr rough.png",
+            "map_Pm metal.png",
+            "map_Ke emission.png",
+            "map_d opacity.png",
+        ] {
+            assert!(doc.contains(expected), "missing {expected:?}: {doc}");
+        }
+    }
+
+    #[test]
+    fn material_pair_uses_the_real_driver_and_reimports() {
+        use crate::driver::{run_preset, MapSet};
+        use crate::presets::{ExportPreset, MapKind};
+
+        let (positions, normals, uvs, indices) = quad();
+        let mesh = view(&positions, &normals, &uvs, &indices);
+        let dir = std::env::temp_dir().join(format!("umber-obj-mtl-driver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut set = MapSet::new(2);
+        for kind in [
+            MapKind::BaseColor,
+            MapKind::Roughness,
+            MapKind::Metallic,
+            MapKind::Normal,
+        ] {
+            set.set(kind, vec![128; 16]);
+        }
+        let preset = ExportPreset::blender_principled();
+        let sources = crate::driver::TokenSources::new("Sword");
+        run_preset(&preset, &set, &sources, &dir).expect("real texture run");
+        let textures = crate::usd::usd_textures(&preset, |output| sources.expand_output(output));
+        let (obj, mtl) = write_obj_with_mtl(&dir, "Sword", &mesh, &textures, None).unwrap();
+        let obj_a = std::fs::read(&obj).unwrap();
+        let mtl_a = std::fs::read(&mtl).unwrap();
+        let (obj_b, mtl_b) = write_obj_with_mtl(&dir, "Sword", &mesh, &textures, None).unwrap();
+        assert_eq!(obj_a, std::fs::read(obj_b).unwrap());
+        assert_eq!(mtl_a, std::fs::read(mtl_b).unwrap());
+        for texture in &textures {
+            assert!(
+                dir.join(&texture.file).is_file(),
+                "missing {}",
+                texture.file
+            );
+        }
+        let mtl_text = std::fs::read_to_string(&mtl).unwrap();
+        for key in ["map_Kd ", "map_Pr ", "map_Pm ", "map_Bump "] {
+            assert!(mtl_text.contains(key), "missing {key}: {mtl_text}");
+        }
+        for load in [umber_mesh::load(&obj), umber_mesh::load_obj(&obj)] {
+            let back = load.expect("OBJ/MTL re-import");
+            assert_eq!(back.triangle_count(), 2);
+            assert_eq!(back.material_names, vec!["Sword"]);
+            assert!(back.positions.iter().flatten().all(|v| v.is_finite()));
+            assert!(back.normals.iter().flatten().all(|v| v.is_finite()));
+            assert!(back.uvs.iter().flatten().all(|v| v.is_finite()));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn packed_and_unsafe_references_fail_before_creating_documents() {
+        let (positions, normals, uvs, indices) = quad();
+        let mesh = view(&positions, &normals, &uvs, &indices);
+        let dir = std::env::temp_dir().join(format!("umber-obj-mtl-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let packed = [texture(
+            "specular_roughness",
+            "b",
+            "Sword_metallicRoughness.png",
+        )];
+        assert!(matches!(
+            write_obj_with_mtl(&dir, "Sword", &mesh, &packed, None),
+            Err(ExportError::Write(_))
+        ));
+        assert!(!dir.exists(), "packed refusal created an output directory");
+        for file in [
+            "/tmp/base.png",
+            "../base.png",
+            "https://example.invalid/base.png",
+            "file:base.png",
+            "C:/base.png",
+            "C:base.png",
+            "bad\\base.png",
+            "bad\nbase.png",
+            "base_<UDIM>.png",
+        ] {
+            let textures = [texture("base_color", "rgb", file)];
+            assert!(
+                to_mtl_document("Sword", &textures, None).is_err(),
+                "unsafe reference accepted: {file:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_texture_and_directory_target_leave_no_pair() {
+        let (positions, normals, uvs, indices) = quad();
+        let mesh = view(&positions, &normals, &uvs, &indices);
+        let dir =
+            std::env::temp_dir().join(format!("umber-obj-mtl-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let textures = [texture("base_color", "rgb", "Sword_baseColor.png")];
+        assert!(matches!(
+            write_obj_with_mtl(&dir, "Sword", &mesh, &textures, None),
+            Err(ExportError::Write(_))
+        ));
+        assert!(!dir.join("Sword.obj").exists());
+        assert!(!dir.join("Sword.mtl").exists());
+
+        write_texture(&dir, "Sword_baseColor.png");
+        std::fs::create_dir_all(dir.join("Sword.obj")).unwrap();
+        assert!(matches!(
+            write_obj_with_mtl(&dir, "Sword", &mesh, &textures, None),
+            Err(ExportError::Write(_))
+        ));
+        assert!(!dir.join("Sword.mtl").exists());
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.join("Sword_baseColor.png")).unwrap();
+            std::os::unix::fs::symlink("/etc/passwd", dir.join("Sword_baseColor.png")).unwrap();
+            assert!(matches!(
+                write_obj_with_mtl(&dir, "Sword", &mesh, &textures, None),
+                Err(ExportError::Write(_))
+            ));
+            assert!(!dir.join("Sword.mtl").exists());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tiled_pair_uses_concrete_names_and_reimports() {
+        use crate::presets::ExportPreset;
+
+        let (positions, normals, uvs, indices) = quad();
+        let mesh = view(&positions, &normals, &uvs, &indices);
+        let dir = std::env::temp_dir().join(format!("umber-obj-mtl-tile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let preset = ExportPreset::blender_principled();
+        let sources = crate::driver::TokenSources::new("Sword");
+        let file = obj_file_for_output(&preset.outputs[0], &sources, Some(1002));
+        assert_eq!(file, "Sword_basecolor_1002.png");
+        write_texture(&dir, &file);
+        let textures = [texture("base_color", "rgb", &file)];
+        let (obj, mtl) = write_obj_with_mtl(&dir, "Sword", &mesh, &textures, Some(1002)).unwrap();
+        assert!(obj.ends_with("Sword_1002.obj"));
+        assert!(mtl.ends_with("Sword_1002.mtl"));
+        let obj_text = std::fs::read_to_string(&obj).unwrap();
+        assert!(obj_text.contains("mtllib Sword_1002.mtl"));
+        assert!(obj_text.contains("usemtl Sword_1002"));
+        let mtl_text = std::fs::read_to_string(&mtl).unwrap();
+        assert!(mtl_text.contains("newmtl Sword_1002"));
+        assert!(mtl_text.contains("map_Kd Sword_basecolor_1002.png"));
+        assert!(!mtl_text.contains("<UDIM>"));
+        let back = umber_mesh::load_obj(&obj).expect("tiled OBJ/MTL re-import");
+        assert_eq!(back.material_names, vec!["Sword_1002"]);
+        assert_eq!(back.triangle_count(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

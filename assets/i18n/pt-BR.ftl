@@ -354,6 +354,7 @@ export =
     .size = Tamanho
     .materialx = MaterialX (.mtlx)
     .usda = USD (.usda)
+    .obj = OBJ + MTL
     .select-tile = Selecione ao menos um tile para exportar.
     .tile-badge = { $count ->
         [one] { $count } tile

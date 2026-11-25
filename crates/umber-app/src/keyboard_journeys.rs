@@ -308,6 +308,7 @@ fn export_journey_tab_order_is_header_combos_toggles_and_every_stop_is_named() {
         (Role::ComboBox, tr("export.size")),
         (Role::CheckBox, tr("export.materialx")),
         (Role::CheckBox, tr("export.usda")),
+        (Role::CheckBox, tr("export.obj")),
         (Role::Button, tr("button.choose")),
         (Role::Button, tr("tiles.label")), // the tiles group header
     ];
@@ -321,8 +322,14 @@ fn export_journey_tab_order_is_header_combos_toggles_and_every_stop_is_named() {
     shift_tab(&mut h);
     assert_eq!(
         focused(&h),
+        Some(expected[5].clone()),
+        "Choose back to OBJ+MTL"
+    );
+    shift_tab(&mut h);
+    assert_eq!(
+        focused(&h),
         Some(expected[4].clone()),
-        "Choose back to USDA"
+        "OBJ+MTL back to USDA"
     );
     shift_tab(&mut h);
     assert_eq!(

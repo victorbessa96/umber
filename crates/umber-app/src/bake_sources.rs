@@ -963,6 +963,7 @@ mod tests {
             }],
             materialx: false,
             usda: false,
+            obj_mtl: false,
         };
         let out = std::env::temp_dir().join(format!(
             "umber-bake-sources-flat-base-{}",
@@ -1339,6 +1340,7 @@ mod tests {
             }],
             materialx: false,
             usda: false,
+            obj_mtl: false,
         };
         let out = std::env::temp_dir().join(format!(
             "umber-bake-sources-assemble-{}",

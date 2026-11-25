@@ -199,6 +199,7 @@ pub fn filter_satisfiable(
             outputs: kept,
             materialx: preset.materialx,
             usda: preset.usda,
+            obj_mtl: preset.obj_mtl,
         },
         skipped,
     )
@@ -371,6 +372,10 @@ pub fn layer_token(doc: Option<&Document>) -> &str {
 /// sets the result is ONE group named `None`, so the caller keeps the
 /// mesh-derived name and the output is byte-identical to before. With
 /// several, each group is `(Some(set), tiles)` in first-seen order.
+fn obj_tile_names(tiles: &[u16]) -> bool {
+    tiles.len() > 1 || tiles.iter().any(|tile| *tile != umber_mesh::FIRST_TILE)
+}
+
 pub fn tile_set_groups(
     tiles: &[u16],
     mut set_of: impl FnMut(u16) -> Option<String>,
@@ -452,6 +457,8 @@ pub struct ExportDialog {
     /// Material/Shader network binding the written textures to the
     /// OpenPBR surface (the preset's `usda` toggle, requirements §6 P1).
     usda: bool,
+    /// Also write OBJ + MTL with passthrough material/texture references.
+    obj_mtl: bool,
     /// g0-notices' open tail: a failure toast queued for the app shell
     /// (drained after the dock into the app's notice stack — the panel
     /// cannot post on it itself). The status line stays in-panel.
@@ -482,6 +489,7 @@ impl ExportDialog {
             mesh_tiles: MeshTilesCache::default(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             toast: None,
             completed_exports: 0,
             run_requested: false,
@@ -525,12 +533,23 @@ impl ExportDialog {
         self.usda = on;
     }
 
+    /// Whether an export also writes OBJ + MTL.
+    pub fn obj_mtl(&self) -> bool {
+        self.obj_mtl
+    }
+
+    /// Turns OBJ + MTL output on/off.
+    pub fn set_obj_mtl(&mut self, on: bool) {
+        self.obj_mtl = on;
+    }
+
     /// The preset an Export click runs: the chosen engine preset with the
     /// dialog's MaterialX and USD toggles applied.
     pub fn build_preset(&self) -> umber_export::ExportPreset {
         let mut preset = self.preset.build();
         preset.materialx = self.materialx;
         preset.usda = self.usda;
+        preset.obj_mtl = self.obj_mtl;
         preset
     }
 
@@ -671,6 +690,7 @@ impl ExportDialog {
                 .ui
                 .checkbox(&mut self.materialx, tr("export.materialx"));
             group.ui.checkbox(&mut self.usda, tr("export.usda"));
+            group.ui.checkbox(&mut self.obj_mtl, tr("export.obj"));
             group.ui.horizontal(|ui| {
                 let dir = self.output_dir.display().to_string();
                 ui.label(tr_args("common.out-dir", [("dir", FluentValue::from(dir))]));
@@ -1010,8 +1030,10 @@ impl ExportDialog {
             }
         };
         let pad_hook: umber_export::DilateHook<'_> = &pad_hook;
+        let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
         let mut written = Vec::new();
         for (set_name, group_tiles) in &groups {
+            let group_tile_names = obj_tile_names(group_tiles);
             let pairs: Vec<(u16, &umber_export::MapSet)> = tile_sets
                 .iter()
                 .filter(|t| group_tiles.contains(&t.tile))
@@ -1031,12 +1053,37 @@ impl ExportDialog {
                 )
                 .with_context(|| format!("run_preset_tiled ({})", group_sources.texture_set))?,
             );
+            if filtered.obj_mtl {
+                for &tile in group_tiles {
+                    let textures = umber_export::usd::usd_textures(&filtered, |output| {
+                        umber_export::obj::obj_file_for_output(
+                            output,
+                            &group_sources,
+                            group_tile_names.then_some(tile),
+                        )
+                    });
+                    let mesh_view = umber_export::usd::UsdMeshView {
+                        positions: &mesh.positions,
+                        normals: &mesh.normals,
+                        uvs: &mesh.uvs,
+                        indices: &mesh.indices,
+                    };
+                    let (obj, mtl) = umber_export::obj::write_obj_with_mtl(
+                        &self.output_dir,
+                        group_sources.texture_set,
+                        &mesh_view,
+                        &textures,
+                        group_tile_names.then_some(tile),
+                    )
+                    .with_context(|| format!("write_obj_with_mtl ({tile})"))?;
+                    written.extend([obj, mtl]);
+                }
+            }
         }
         if filtered.usda {
             // The `.usda` carries the whole mesh (per-tile splits stay a
             // bake-window concern); only its texture references are
             // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
-            let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
             let textures = umber_export::usd::usd_textures(&filtered, |output| {
                 umber_export::usd::usda_file_for_output(output, &sources, tile_names)
             });
@@ -1118,7 +1165,11 @@ mod tests {
         harness.run();
         // The reason line is on screen (`get_by_label` panics when absent).
         harness.get_by_label(&crate::i18n::tr("export.no-mesh"));
-        let (mtlx, usda) = (harness.state().materialx(), harness.state().usda());
+        let (mtlx, usda, obj_mtl) = (
+            harness.state().materialx(),
+            harness.state().usda(),
+            harness.state().obj_mtl(),
+        );
         harness
             .get_by_label(&crate::i18n::tr("export.materialx"))
             .click();
@@ -1127,8 +1178,11 @@ mod tests {
             .get_by_label(&crate::i18n::tr("export.usda"))
             .click();
         harness.run();
+        harness.get_by_label(&crate::i18n::tr("export.obj")).click();
+        harness.run();
         assert_eq!(harness.state().materialx(), !mtlx, "MaterialX toggled");
         assert_eq!(harness.state().usda(), !usda, "USDA toggled");
+        assert_eq!(harness.state().obj_mtl(), !obj_mtl, "OBJ+MTL toggled");
         // The gate: disabled through AccessKit, and a click is inert.
         let export = crate::i18n::tr("button.export");
         assert!(harness.get_by_label(&export).accesskit_node().is_disabled());
@@ -1353,6 +1407,73 @@ mod tests {
     }
 
     #[test]
+    fn obj_mtl_export_writes_and_reimports_material_pair() {
+        let mut d = dialog();
+        d.size = 8;
+        d.set_preset(PresetChoice::BlenderPrincipled);
+        d.set_obj_mtl(true);
+        let out = std::env::temp_dir().join(format!("umber-export-obj-mtl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        d.set_output_dir(out.clone());
+        let quad = umber_mesh::MeshData {
+            positions: vec![[0.0; 3]; 4],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("real 8x8 OBJ/MTL export requires a wgpu adapter");
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        assert!(
+            adapter.features().contains(features),
+            "real 8x8 OBJ/MTL export requires TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES"
+        );
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .expect("device");
+        let gpu = umber_gpu::GpuContext::new(
+            adapter,
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        );
+        d.export_now(ExportContext {
+            gpu: Some(&gpu),
+            mesh: Some(&quad),
+            mesh_path: None,
+            paint: None,
+            doc: None,
+            graph: None,
+            baked_normal: None,
+        });
+        assert!(!d.last_export_failed(), "export status: {}", d.status());
+        let expected_set = umber_mesh::texture_set_name(
+            std::path::Path::new(bakes_panel::FALLBACK_TEXTURE_SET),
+            &quad,
+        );
+        let obj = out.join(format!("{expected_set}.obj"));
+        let mtl = out.join(format!("{expected_set}.mtl"));
+        assert!(obj.is_file(), "missing OBJ: {}", obj.display());
+        assert!(mtl.is_file(), "missing MTL: {}", mtl.display());
+        assert!(d.last_written().contains(&obj));
+        assert!(d.last_written().contains(&mtl));
+        let back = umber_mesh::load_obj(&obj).expect("OBJ/MTL re-import");
+        assert_eq!(back.triangle_count(), 2);
+        assert_eq!(back.material_names, vec![expected_set]);
+        let mtl_text = std::fs::read_to_string(&mtl).expect("read MTL");
+        assert!(mtl_text.contains("map_Kd "));
+        assert!(mtl_text.contains("map_Bump "));
+        let _ = std::fs::remove_dir_all(out);
+    }
+
+    #[test]
     fn the_failed_flag_starts_clear() {
         let d = dialog();
         assert!(!d.last_export_failed(), "a clean dialog reports success");
@@ -1389,6 +1510,17 @@ mod tests {
         // The satisfiable-outputs filter keeps the toggle.
         let (filtered, _) = filter_satisfiable(&d.build_preset(), &[]);
         assert!(filtered.usda);
+    }
+
+    #[test]
+    fn obj_mtl_toggle_reaches_the_run_preset() {
+        let mut d = dialog();
+        assert!(!d.obj_mtl(), "off by default");
+        assert!(!d.build_preset().obj_mtl);
+        d.set_obj_mtl(true);
+        assert!(d.build_preset().obj_mtl);
+        let (filtered, _) = filter_satisfiable(&d.build_preset(), &[]);
+        assert!(filtered.obj_mtl);
     }
 
     #[test]
@@ -1739,7 +1871,20 @@ mod tests {
     }
 
     #[test]
-    fn tiles_group_by_texture_set_only_when_there_are_several() {
+    fn obj_tile_suffix_decision_is_per_group() {
+        assert!(!obj_tile_names(&[umber_mesh::FIRST_TILE]));
+        assert!(obj_tile_names(&[1002]));
+        assert!(obj_tile_names(&[umber_mesh::FIRST_TILE, 1002]));
+        // Duplicate tiles are rejected separately; the driver's suffix
+        // predicate still evaluates true for them.
+        assert!(obj_tile_names(&[
+            umber_mesh::FIRST_TILE,
+            umber_mesh::FIRST_TILE
+        ]));
+    }
+
+    #[test]
+    fn tiles_group_by_texture_set_only_when_several() {
         // One set (or no session): one unnamed group, the old output.
         assert_eq!(
             tile_set_groups(&[1001, 1002], |_| Some("Body".into())),

@@ -250,6 +250,9 @@ struct AgentExportStep {
     /// Also write `<textureSet>.usda` (the `--usda` flag's session form).
     #[serde(default)]
     usda: bool,
+    /// Also write OBJ + MTL (the `--obj` flag's session form).
+    #[serde(default)]
+    obj_mtl: bool,
 }
 
 /// `project_open` — open a `.umber` project directory and hold it for
@@ -1324,7 +1327,10 @@ impl Session {
                     preset_name: &s.preset,
                     flags: &flags,
                     requested_tiles: &s.tiles,
-                    usda: s.usda,
+                    documents: crate::ExportDocFlags {
+                        usda: s.usda,
+                        obj_mtl: s.obj_mtl,
+                    },
                     // Bake's v0 rule, unified: an open project's active
                     // set names the export; none open = the mesh's set.
                     set_override: self.project.as_ref().map(|held| held.active.as_str()),

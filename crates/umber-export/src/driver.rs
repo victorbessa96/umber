@@ -1052,6 +1052,7 @@ mod tests {
             name: "wiring probe".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![crate::presets::OutputSpec {
                 filename: "$textureSet_wiring.png".into(),
                 maps: vec![(MapKind::Roughness, vec![]), (MapKind::Metallic, vec![])],
@@ -1107,6 +1108,7 @@ mod tests {
             name: "token probe".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1142,6 +1144,7 @@ mod tests {
             name: "token probe".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1173,6 +1176,7 @@ mod tests {
             name: "orm probe".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![crate::presets::OutputSpec {
                 filename: "$textureSet_$srcMap_$colorSpace.png".into(),
                 maps: vec![
@@ -1311,6 +1315,7 @@ mod tests {
             name: "udim probe".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![passthrough_output(
                 "$textureSet_$srcMap_$udim.png",
                 MapKind::BaseColor,
@@ -1401,6 +1406,7 @@ mod tests {
             name: "token probe".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1703,6 +1709,7 @@ mod tests {
             outputs: vec![tiff, exr],
             materialx: true,
             usda: false,
+            obj_mtl: false,
         };
         let mut set = MapSet::new(2);
         set.set(MapKind::Roughness, solid(2, 64));
@@ -1785,6 +1792,7 @@ mod tests {
             }],
             materialx: false,
             usda: false,
+            obj_mtl: false,
         };
         let tiles: Vec<(u16, &MapSet)> = vec![(1001, &set), (1002, &other)];
         let out = std::env::temp_dir().join(format!(
@@ -1818,6 +1826,7 @@ mod tests {
             name: "dil write".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![passthrough_output("$textureSet_r.png", MapKind::Roughness)],
         };
         let out =
@@ -1854,6 +1863,7 @@ mod tests {
             name: "dil none".into(),
             materialx: false,
             usda: false,
+            obj_mtl: false,
             outputs: vec![passthrough_output("$textureSet_r.png", MapKind::Roughness)],
         };
         let base =
