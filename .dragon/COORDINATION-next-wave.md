@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** the 4 brightness x 7 accent theme matrix is implemented at `4cf46062068fd61d89fedb54a5b2fb58c1c537ec`, on brief `4d626fafe718` and claim `7e003000af7b`; queue row 613 and report `docs/loop/kill-reports/2026-11-25-umber-theme-matrix.md`. `tokens_with_accent`, `themed_matrix_style`, `apply_matrix`, persisted Accent preferences, Dim Quick Setup, localized selectors, and Ember-compatible wrappers are landed. Theme is 18/0, Preferences 25/0, first_run 3/0, full app 1,281/0, strict gui+app clippy is clean, and independent review `deleg_61ecb62c` returned SHIP with zero findings. Fresh ad-hoc probe passed 46 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The 8K COW A/B measurement is next. This status-doc commit releases `razul-theme-matrix`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** 8K COW-versus-dirty-tile A/B is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-cow-ab`, on committed brief `e9f14c288b07` and queue row 614. Base `b772f8191d39` was clean and origin-equal, with no live sibling or prior lock. Real 8192² record_stroke baseline vs sparse 64x64 COW prototype, full and small overlapping strokes, bytes and median latency, final-byte equality, probe removed before commit. No production COW rewrite. Independent review, report, safe-push, and origin verify.
 
 
 ## Historical coordination snapshots (append-only; not current status)
