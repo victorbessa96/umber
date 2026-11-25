@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** late OBJ writer failure coverage is implemented at `adcf99d7da0e678bbf87e382d29d8e661f087ca9`, on brief `93f27b70cbbd` and claim `2e3b86be4605`; queue row 624 and report `docs/loop/kill-reports/2026-11-25-umber-obj-writer-coverage.md`. Writer-level ragged no-directory assertions and the create_dir_all failure branch are pinned with no production behavior changes. OBJ filter is 9/0, strict export clippy is clean, and replacement review `deleg_c1270888` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-obj-writer-coverage`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The late OBJ writer failure coverage is implemented at `adcf99d7da0e678bbf87e382d29d8e661f087ca9` with replacement review SHIP and a 9-test filter. Origin read-back reached `16465e9dae7f435ddb22641651295930ad5015ff`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
