@@ -20,9 +20,9 @@ partner."
 
 ---
 
-## Current hardening wave (2026-11-23)
+## Current hardening wave (2026-11-24)
 
-The generated capability parity table is implemented at `72774f67574eabddf49441af66d30f7bce3011e0`, with brief `907515da` and claim `04d1265f`. `scripts/parity.py` deterministically generates `docs/parity.md` from the authoritative requirements table and CI checks exact-byte drift. R1's malformed-row, escaped-pipe, CRLF-comparison, and legacy-status findings are fixed; the focused probe passed 8/8, export passed 105/0, and R3 `deleg_b0ab5ab4` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The verified live-docs reconciliation is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Landed-state documentation reconciliation is implemented at `81f89a057d891c8d47538cdd90751e22c3d271e8`, with brief `2afbbca5` and claim `c7337d08`. Agent contracts, deferred readiness, desktop checks, dogfood prep, next steps, wave protocol, ROADMAP assets, and the row-156 scoping record now match landed commits and real gates. R1's dogfood-template finding was fixed; the fresh probe passed parity 8/8, docs 29 assertions, and export 105/0; R2 `deleg_11eae051` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. OBJ material/MTL binding is the next code-ready lane. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

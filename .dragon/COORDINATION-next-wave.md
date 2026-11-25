@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** landed-state documentation reconciliation is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-docs-reconciliation`, on committed brief `2afbbca593ac` and queue row 606. Base `3339df2a7dfa` was clean and origin-equal, with no live sibling or prior lock. Correct live agent/readiness/desktop/dogfood/next-step/wave claims against verified commits and tag ancestry; preserve real human, product, platform, and release gates. Docs-only gates, independent review, report, safe-push, and origin verify. No behavior, second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-24:** landed-state documentation reconciliation is implemented at `81f89a057d891c8d47538cdd90751e22c3d271e8`, on brief `2afbbca593ac` and claim `c7337d081796`; queue row 607 and report `docs/loop/kill-reports/2026-11-24-umber-docs-reconciliation.md`. Agent contracts, readiness, desktop, dogfood, next-step, wave, ROADMAP, and scoping claims now match landed commits and real gates. R1's dogfood-template finding was fixed; the fresh probe passed parity 8/8, docs 29 assertions, and export 105/0; R2 `deleg_11eae051` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. OBJ material/MTL binding is next. This status-doc commit releases `razul-docs-reconciliation`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)

@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Docs — landed-state reconciliation:** `81f89a05` corrects agent contracts, deferred readiness, desktop checks, dogfood prep, next steps, wave protocol, ROADMAP assets, and the row-156 scoping record against landed commits and real gates. R1's dogfood-template finding was fixed; the fresh probe passed parity 8/8, docs 29 assertions, and export 105/0; R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-docs-reconciliation.md`.
+
 - **Added — generated capability parity table:** `72774f67` adds deterministic `docs/parity.md` generation from the authoritative requirements table plus a CI drift gate. The parser preserves escaped pipes, rejects malformed requirement rows, handles legacy three-cell status rows without duplication, and compares exact UTF-8 bytes. R1's four findings were fixed, the focused probe passed 8/8, export passed 105/0, and R3 returned SHIP with zero findings. Report: `docs/loop/kill-reports/2026-11-24-umber-parity-table.md`.
 
 - **Added — GLB mesh export round-trip:** `f949199c` adds deterministic GLB 2.0 geometry with typed ragged/over-cap/write failures, exact layout assertions, and real `load_gltf` round-trips through the hostile-output battery. R1 layout/atomicity findings fixed, full export 98+7/0, R2 SHIP. Material/texture references remain separate follow-ups. Report: `docs/loop/kill-reports/2026-11-24-umber-glb-export.md`.
