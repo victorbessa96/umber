@@ -511,28 +511,54 @@ mod tests {
     #[test]
     fn ragged_and_over_cap_are_typed_failures() {
         let (positions, normals, uvs, _) = quad();
+        let assert_writer_rejected = |case: &str, mesh: ObjMeshView<'_>| {
+            let dir = std::env::temp_dir().join(format!(
+                "umber-obj-ragged-writer-{case}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(matches!(
+                write_obj(&dir, "S", &mesh),
+                Err(ExportError::Write(_))
+            ));
+            assert!(!dir.exists(), "{case}: writer created a partial output dir");
+        };
         assert!(matches!(
             to_obj_document("S", &view(&positions, &normals, &uvs, &[])),
             Err(ExportError::Write(_))
         ));
+        assert_writer_rejected("empty", view(&positions, &normals, &uvs, &[]));
         assert!(matches!(
             to_obj_document("S", &view(&positions, &normals, &uvs, &[0, 1])),
             Err(ExportError::Write(_))
         ));
+        assert_writer_rejected("ragged", view(&positions, &normals, &uvs, &[0, 1]));
         assert!(matches!(
             to_obj_document("S", &view(&positions, &normals, &uvs, &[0, 1, 99])),
             Err(ExportError::Write(_))
         ));
+        assert_writer_rejected(
+            "out-of-range",
+            view(&positions, &normals, &uvs, &[0, 1, 99]),
+        );
         let short_normals = vec![[0.0f32, 0.0, 1.0]; 2];
         assert!(matches!(
             to_obj_document("S", &view(&positions, &short_normals, &uvs, &[0, 1, 2])),
             Err(ExportError::Write(_))
         ));
+        assert_writer_rejected(
+            "short-normals",
+            view(&positions, &short_normals, &uvs, &[0, 1, 2]),
+        );
         let short_uvs = vec![[0.0f32, 0.0]; 2];
         assert!(matches!(
             to_obj_document("S", &view(&positions, &normals, &short_uvs, &[0, 1, 2])),
             Err(ExportError::Write(_))
         ));
+        assert_writer_rejected(
+            "short-uvs",
+            view(&positions, &normals, &short_uvs, &[0, 1, 2]),
+        );
 
         let n = 600_000;
         let positions = vec![[0.0f32; 3]; n];
@@ -588,6 +614,21 @@ mod tests {
         ));
         assert!(dir.join("Sword.obj").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
+
+        // `create_dir_all(out_dir)` itself fails when out_dir is a regular
+        // file. The error is typed, not a panic or a success report.
+        let dir = std::env::temp_dir().join(format!(
+            "umber-obj-create-dir-failure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&dir);
+        std::fs::write(&dir, b"file, not a directory").unwrap();
+        assert!(matches!(
+            write_obj(&dir, "Sword", &mesh),
+            Err(ExportError::Write(_))
+        ));
+        let _ = std::fs::remove_file(dir);
     }
 
     fn texture(input: &'static str, output: &'static str, file: &str) -> UsdTexture {
