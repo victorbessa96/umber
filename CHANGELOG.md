@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Added — OBJ material/MTL round-trip:** `d874fa54` adds passthrough `mtllib`/`usemtl` bindings through the app, CLI, batch, and agent, with packed-channel refusal, canonical/symlink containment, concrete per-tile pairs, and previous-MTL plus OBJ-backup rollback. R1's per-set suffix and URI/drive findings were fixed; full app 1,280/0, export 110/0, CLI 159/0, and R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-obj-mtl.md`.
+
 - **Docs — landed-state reconciliation:** `81f89a05` corrects agent contracts, deferred readiness, desktop checks, dogfood prep, next steps, wave protocol, ROADMAP assets, and the row-156 scoping record against landed commits and real gates. R1's dogfood-template finding was fixed; the fresh probe passed parity 8/8, docs 29 assertions, and export 105/0; R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-docs-reconciliation.md`.
 
 - **Added — generated capability parity table:** `72774f67` adds deterministic `docs/parity.md` generation from the authoritative requirements table plus a CI drift gate. The parser preserves escaped pipes, rejects malformed requirement rows, handles legacy three-cell status rows without duplication, and compares exact UTF-8 bytes. R1's four findings were fixed, the focused probe passed 8/8, export passed 105/0, and R3 returned SHIP with zero findings. Report: `docs/loop/kill-reports/2026-11-24-umber-parity-table.md`.

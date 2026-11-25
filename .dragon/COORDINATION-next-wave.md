@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-24:** OBJ material/MTL export is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-obj-mtl`, on committed brief `3c83c23ca533` and queue row 608. Base `be9e5328a3f6` was clean and origin-equal, with no live sibling or prior lock. Add obj_mtl preset/driver/CLI/app wiring, passthrough MTL bindings, packed-channel refusal, concrete per-tile pairs, real driver and re-import coverage, and failure-atomic writes. Independent review, report, safe-push, and origin verify. No packed syntax invention, geometry changes, second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** OBJ material/MTL export is implemented at `d874fa546caef0a6c3cfd3d3d0cf5f61b293dd07`, on brief `3c83c23ca533` and claim `d489da63d83c`; queue row 609 and report `docs/loop/kill-reports/2026-11-24-umber-obj-mtl.md`. Passthrough MTL bindings, packed-channel refusal, canonical/symlink containment, concrete per-tile pairs, and rollback are wired through the app, CLI, batch, and agent. R1's per-set suffix and URI/drive findings were fixed; full app is 1,280/0, export 110/0, CLI 159/0, and R2 `deleg_02f5c976` returned SHIP with zero findings. Fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. EyeDepth is next. This status-doc commit releases `razul-obj-mtl`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)

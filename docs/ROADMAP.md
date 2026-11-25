@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-Landed-state documentation reconciliation is implemented at `81f89a057d891c8d47538cdd90751e22c3d271e8`, with brief `2afbbca5` and claim `c7337d08`. Agent contracts, deferred readiness, desktop checks, dogfood prep, next steps, wave protocol, ROADMAP assets, and the row-156 scoping record now match landed commits and real gates. R1's dogfood-template finding was fixed; the fresh probe passed parity 8/8, docs 29 assertions, and export 105/0; R2 `deleg_11eae051` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. OBJ material/MTL binding is the next code-ready lane. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+OBJ material/MTL export is implemented at `d874fa546caef0a6c3cfd3d3d0cf5f61b293dd07`, with brief `3c83c23c` and claim `d489da63`. Passthrough MTL bindings, packed-channel refusal, canonical/symlink containment, concrete per-tile pairs, and previous-MTL plus OBJ-backup rollback are wired through the app, CLI, batch, and agent. R1's per-set suffix and URI/drive findings were fixed; full app is 1,280/0, export 110/0, CLI 159/0, and R2 `deleg_02f5c976` returned SHIP with zero findings. A fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. EyeDepth is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
