@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The late material-picker acceptance coverage is implemented at `a40cdb7f042598006942e00376310e9e8f0a2081` with R2 SHIP and an 8-test filter. Origin read-back reached `e4f270a2a93b70b2ebe6553b44607006b93cd084`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** late Assets mesh acceptance coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-assets-mesh-coverage`, on committed brief `dd1510b3fb1f` and queue row 620. Base `bc3d7fc98ae6` was clean and origin-equal, with no live sibling or prior lock. Mesh-specific no-match assertion and exact bundled/exe/extra ordering with built-in alias suppression. No production behavior changes. Independent review, report, safe-push, and origin verify.
 
 
 ## Historical coordination snapshots (append-only; not current status)
