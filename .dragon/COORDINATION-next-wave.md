@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** EyeDepth visibility is implemented at `b62397c2fbe6ad893788f3f5398a07e80f0b1b10`, on brief `078ef410d0ed` and claim `28504429fbff`; queue row 611 and report `docs/loop/kill-reports/2026-11-25-umber-eye-depth.md`. `EYE_DEPTH_HIT_EPS = 1e-5` names the nearest-hit visibility contract: the nearest positive ray hit selects the surface and a miss produces no dab. Mesh raycast is 8/0, the GPU EyeDepth test is 1/0 with actual nearer-surface paint and byte-identical miss behavior, strict mesh+app clippy is clean, and independent review `deleg_c43df54b` returned SHIP with zero findings. Fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The theme matrix is next. This status-doc commit releases `razul-eye-depth`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** theme matrix is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-theme-matrix`, on committed brief `4d626fafe718` and queue row 612. Base `bcce1321f28b` was clean and origin-equal, with no live sibling or prior lock. Four brightness levels x seven accents through tokens_with_accent/themed_matrix_style/apply_matrix, persisted Accent preferences, Dim Quick Setup, localized selectors, contrast invariants, and compatibility wrappers. Independent review, report, safe-push, and origin verify. No token-system rewrite, Follow OS change, second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
