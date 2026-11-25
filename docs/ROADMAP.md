@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-The late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f`, with brief `ec5aaa2f` and claim `eacba075`. Document-level divisibility and fresh nonexistent-directory writer assertions are pinned with no production behavior changes. GLB filter is 4/0, strict export clippy is clean, and independent review `deleg_15967586` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+All code-ready lanes are landed and origin-verified. The late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f` with independent SHIP and a 4-test filter. Origin read-back reached `5457c725da2d8c740aa9386fc08b195536557167`. Only genuine human/product/platform gates remain; the complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

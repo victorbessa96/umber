@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f`, on brief `ec5aaa2f6ad0` and claim `eacba075ecbc`; queue row 627 and report `docs/loop/kill-reports/2026-11-25-umber-glb-writer-coverage.md`. Document-level divisibility and fresh nonexistent-directory writer assertions are pinned with no production behavior changes. GLB filter is 4/0, strict export clippy is clean, and independent review `deleg_15967586` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-glb-writer-coverage`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f` with independent SHIP and a 4-test filter. Origin read-back reached `5457c725da2d8c740aa9386fc08b195536557167`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
