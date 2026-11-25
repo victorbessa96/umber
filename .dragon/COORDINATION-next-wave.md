@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** 8K COW-versus-dirty-tile A/B is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-cow-ab`, on committed brief `e9f14c288b07` and queue row 614. Base `b772f8191d39` was clean and origin-equal, with no live sibling or prior lock. Real 8192² record_stroke baseline vs sparse 64x64 COW prototype, full and small overlapping strokes, bytes and median latency, final-byte equality, probe removed before commit. No production COW rewrite. Independent review, report, safe-push, and origin verify.
+**Updated 2026-11-25:** the 8K COW A/B is measured and **deferred** with independent SHIP (`deleg_106ff052`). Brief `e9f14c288b07`, claim `3d0bdc150c22`, queue row 615 and report `docs/loop/kill-reports/2026-11-25-umber-cow-ab.md`. Actual 8192² measurements: full_one is 2.000× smaller, full_three and small_three are only 1.333× smaller, below the pre-registered 1.5× adoption threshold. Latency is better in every case, but it does not meet the memory rule. The temporary probe was removed; only report/status docs land. A fresh final probe passed 47 targeted tests with final-byte equality, clippy, and static gates green. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-cow-ab`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)

@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Measured — 8K COW A/B deferred:** actual 8192² `record_stroke` baseline vs sparse 64×64 COW prototype with final-byte equality. Full-one is 2.000× smaller, but full_three and small_three are only 1.333× smaller, below the pre-registered 1.5× adoption threshold. Latency is better in every case, but the memory rule is not met. The temporary probe was removed; only report/status docs land. Fresh final probe: 47 targeted tests and static gates GREEN. Independent review `deleg_106ff052` SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-cow-ab.md`.
+
 - **Added — 4 brightness x 7 accent theme matrix:** `4cf46062` adds Dim plus seven accents through `tokens_with_accent`, `themed_matrix_style`, `apply_matrix`, persisted Accent preferences, Dim Quick Setup, localized selectors, and Ember-compatible wrappers. Theme 18/0, Preferences 25/0, first_run 3/0, full app 1,281/0, strict gui+app clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-theme-matrix.md`.
 
 - **Added — EyeDepth visibility contract:** `b62397c2` names `EYE_DEPTH_HIT_EPS = 1e-5` and pins nearest-visible-surface selection with actual GPU paint readback and byte-identical miss behavior. Mesh raycast 8/0, EyeDepth GPU test 1/0, strict mesh+app clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-eye-depth.md`.

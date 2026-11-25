@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-The 4 brightness x 7 accent theme matrix is implemented at `4cf46062068fd61d89fedb54a5b2fb58c1c537ec`, with brief `4d626faf` and claim `7e003000`. `tokens_with_accent`, `themed_matrix_style`, `apply_matrix`, persisted Accent preferences, Dim Quick Setup, localized selectors, and Ember-compatible wrappers are landed. Theme is 18/0, Preferences 25/0, first_run 3/0, full app 1,281/0, strict gui+app clippy is clean, and independent review `deleg_61ecb62c` returned SHIP with zero findings. A fresh ad-hoc probe passed 46 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The 8K COW A/B measurement is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+The 8K COW A/B is measured and **deferred** with independent SHIP (`deleg_106ff052`). Brief `e9f14c28`, claim `3d0bdc15`. Actual 8192² measurements: full_one is 2.000× smaller, full_three and small_three are only 1.333× smaller, below the pre-registered 1.5× adoption threshold. Latency is better in every case, but it does not meet the memory rule. The temporary probe was removed; only report/status docs land. A fresh final probe passed 47 targeted tests with final-byte equality, clippy, and static gates green. Final report/queue hashes and origin verification remain. The final origin check is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
