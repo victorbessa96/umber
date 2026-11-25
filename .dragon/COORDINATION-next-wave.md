@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** late material-picker acceptance coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-material-picker-coverage`, on committed brief `e08bdada24f4` and queue row 617. Base `857886f57633` was clean and origin-equal, with no live sibling or prior lock. Add active preservation, non-fill/no-op, and declared-but-unmaterialized exclusion tests from the late R1 finding. No production behavior changes. Independent review, report, safe-push, and origin verify.
+**Updated 2026-11-25:** late material-picker acceptance coverage is implemented at `a40cdb7f042598006942e00376310e9e8f0a2081`, on brief `e08bdada24f4` and claim `50d0d5302fa2`; queue row 618 and report `docs/loop/kill-reports/2026-11-25-umber-material-picker-coverage.md`. Active non-default projection/mask/target-channel preservation, no-selection/non-fill no-op, and declared-but-unmaterialized exclusion are pinned with no production behavior changes. R1's default-baseColor fixture weakness was fixed to `custom`; picker filter is 8/0, strict app clippy is clean, and R2 `deleg_d7f9eeea` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-material-picker-coverage`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
