@@ -304,6 +304,12 @@ mod tests {
             to_glb_document("S", &view(&positions, &normals, &uvs, &[0, 1])),
             Err(ExportError::Write(_))
         ));
+        // Nonzero triangle count with a non-multiple index count reaches the
+        // divisibility branch, unlike `[0, 1]`, which exits as empty.
+        assert!(matches!(
+            to_glb_document("S", &view(&positions, &normals, &uvs, &[0, 1, 2, 0])),
+            Err(ExportError::Write(_))
+        ));
         assert!(matches!(
             to_glb_document("S", &view(&positions, &normals, &uvs, &[0, 1, 99])),
             Err(ExportError::Write(_))
@@ -353,6 +359,47 @@ mod tests {
                 "{label} left a partial file"
             );
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // Fresh nonexistent directories pin writer-level no-output for every
+        // geometry-validation failure, including the true divisibility case.
+        for (label, indices, normals, uvs) in [
+            ("empty", Vec::new(), normals.clone(), uvs.clone()),
+            (
+                "nonmultiple",
+                vec![0, 1, 2, 0],
+                normals.clone(),
+                uvs.clone(),
+            ),
+            ("out_of_range", vec![0, 1, 99], normals.clone(), uvs.clone()),
+            (
+                "short_normals",
+                vec![0, 1, 2],
+                short_normals.clone(),
+                uvs.clone(),
+            ),
+            (
+                "short_uvs",
+                vec![0, 1, 2],
+                normals.clone(),
+                short_uvs.clone(),
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "umber-glb-writer-nonexistent-{label}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mesh = view(&positions, &normals, &uvs, &indices);
+            assert!(
+                matches!(write_glb(&dir, label, &mesh), Err(ExportError::Write(_))),
+                "{label}"
+            );
+            assert!(!dir.exists(), "{label} created a partial output dir");
+            assert!(
+                !dir.join(format!("{label}.glb")).exists(),
+                "{label} left a partial file"
+            );
         }
 
         let n = 8_000_001;
