@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-EyeDepth visibility is implemented at `b62397c2fbe6ad893788f3f5398a07e80f0b1b10`, with brief `078ef410` and claim `28504429`. `EYE_DEPTH_HIT_EPS = 1e-5` names the nearest-hit visibility contract: the nearest positive ray hit selects the surface and a miss produces no dab. Mesh raycast is 8/0, the GPU EyeDepth test is 1/0 with actual nearer-surface paint and byte-identical miss behavior, strict mesh+app clippy is clean, and independent review `deleg_c43df54b` returned SHIP with zero findings. A fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The theme matrix is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+The 4 brightness x 7 accent theme matrix is implemented at `4cf46062068fd61d89fedb54a5b2fb58c1c537ec`, with brief `4d626faf` and claim `7e003000`. `tokens_with_accent`, `themed_matrix_style`, `apply_matrix`, persisted Accent preferences, Dim Quick Setup, localized selectors, and Ember-compatible wrappers are landed. Theme is 18/0, Preferences 25/0, first_run 3/0, full app 1,281/0, strict gui+app clippy is clean, and independent review `deleg_61ecb62c` returned SHIP with zero findings. A fresh ad-hoc probe passed 46 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The 8K COW A/B measurement is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

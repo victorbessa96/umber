@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Added — 4 brightness x 7 accent theme matrix:** `4cf46062` adds Dim plus seven accents through `tokens_with_accent`, `themed_matrix_style`, `apply_matrix`, persisted Accent preferences, Dim Quick Setup, localized selectors, and Ember-compatible wrappers. Theme 18/0, Preferences 25/0, first_run 3/0, full app 1,281/0, strict gui+app clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-theme-matrix.md`.
+
 - **Added — EyeDepth visibility contract:** `b62397c2` names `EYE_DEPTH_HIT_EPS = 1e-5` and pins nearest-visible-surface selection with actual GPU paint readback and byte-identical miss behavior. Mesh raycast 8/0, EyeDepth GPU test 1/0, strict mesh+app clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-eye-depth.md`.
 
 - **Added — OBJ material/MTL round-trip:** `d874fa54` adds passthrough `mtllib`/`usemtl` bindings through the app, CLI, batch, and agent, with packed-channel refusal, canonical/symlink containment, concrete per-tile pairs, and previous-MTL plus OBJ-backup rollback. R1's per-set suffix and URI/drive findings were fixed; full app 1,280/0, export 110/0, CLI 159/0, and R2 SHIP. Report: `docs/loop/kill-reports/2026-11-24-umber-obj-mtl.md`.
