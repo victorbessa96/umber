@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The late OBJ writer failure coverage is implemented at `adcf99d7da0e678bbf87e382d29d8e661f087ca9` with replacement review SHIP and a 9-test filter. Origin read-back reached `16465e9dae7f435ddb22641651295930ad5015ff`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** late GLB writer failure coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-glb-writer-coverage`, on committed brief `ec5aaa2f6ad0` and queue row 626. Base `2c3cb1afa91e` was clean and origin-equal, with no live sibling or prior lock. Document-level non-multiple `[0,1,2,0]` divisibility case and fresh nonexistent-directory writer assertions for invalid geometry. No production behavior changes. Independent review, report, safe-push, and origin verify.
 
 
 ## Historical coordination snapshots (append-only; not current status)
