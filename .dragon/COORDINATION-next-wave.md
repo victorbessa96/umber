@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The late Assets mesh acceptance coverage is implemented at `35f12d3256c199819fca7dfce058f4c74fa6058f` with independent SHIP and a 32-test filter. Origin read-back reached `07321ac3f86b307fd4d64ab7255dea9c66ae5cbb`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** late OBJ writer failure coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-obj-writer-coverage`, on committed brief `93f27b70cbbd` and queue row 623. Base `17e85c1db3f2` was clean and origin-equal, with no live sibling or prior lock. Writer-level ragged no-directory assertions and create_dir_all failure branch. No production behavior changes. Independent review, report, safe-push, and origin verify.
 
 
 ## Historical coordination snapshots (append-only; not current status)
