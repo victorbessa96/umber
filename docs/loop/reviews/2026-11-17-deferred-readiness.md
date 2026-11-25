@@ -9,18 +9,14 @@ Release `v0.1.0-alpha.1` published 2026-11-16 with 18 assets (app + cli, linux +
 
 ## 9. R-A2 v3 depth/occlusion culling
 
-**Current gate**  
-Design brief + kill brief landed; implementation **not started**. Gate is the standing wave protocol: brief → kill-lock → claw → dragon battery (clippy `-D warnings`, check-layers, scorecard, rustfmt, crate tests, CI) → kill report → `dcommit --path-limited` → `safe-push` bare → release lock.  
-`docs/loop/briefs/2026-11-09-projection-occlusion-design.md:95-99` (gate clause); `docs/loop/briefs/2026-11-09-projection-occlusion-kill-brief.md:4-5` (lock `razul-projection-occlusion-w21`); `docs/loop/waves/2026-11-09-wave-plan.md:210-226` (standing order).
-
-**What would open it**  
-A dragon dispatch decision to brief the kill. The briefs are complete and measurable (pins named, cost class claimed 64 MiB at 4096² `docs/loop/briefs/2026-11-09-projection-occlusion-design.md:57-63`).
+**Current state — corrected 2026-11-24**
+**LANDED `b228767f`**: depth raster + `ProjectionState::occlusion`, default on. The original design/dispatch gate is closed; do not redispatch `razul-projection-occlusion-w21`. ROADMAP's R-A2 row records v3 landed and the original wave-plan table closes W2 on this commit.
 
 **Concrete next action**  
-Dispatch kill-lock `razul-projection-occlusion-w21` to a claw; surface files enumerated in kill brief `docs/loop/briefs/2026-11-09-projection-occlusion-kill-brief.md:7-15` (new `crates/umber-mesh/src/depth.rs`, `projection.rs`, `display_panel.rs`, `main.rs`, both `.ftl` catalogs).
+None for occlusion engineering. The seam/symmetry expansion, decal channel, and projection bake family remain product decisions in item 10, not implementation residue.
 
 **Worth before v0.1.0 stable?**  
-**No.** ROADMAP row 238 explicitly: "CLOSED to v3 (2026-11-10)" `docs/ROADMAP.md:238`. The v1 decal projector + v2a tiling + v2b follow-camera + v2c backface culling + v2d one-pass raster + W1.1 UV conditioning are LANDED; v3 depth/occlusion is the named v3 follow-up. v0.1.0 checklist does not require it.
+Already landed. No open v3 engineering remains; only the separately gated product questions survive.
 
 ---
 
@@ -58,17 +54,14 @@ Wait for Windows session availability. No code derivation until the gate opens (
 
 ## 12. L7 color_button delegate conversion
 
-**Current gate**  
-**G1-gated**. G1 (picker-sliders-recents) landed `21ada34` + `5b38c96` (pushed `e610ed7..96edd1e`) `docs/loop/queue.md:105`. The additive `color_button_with` sits beside stock `color_button` `crates/umber-gui/src/widgets/color_picker.rs:745-956`; three app sites migrated to `color_button_with` `crates/umber-app/src/preferences.rs:412-429`. Rule 6 (wave plan): "After A3 migrates all three sites, the old `color_button` has no app consumer. Rule 6: it becomes a thin delegate to `color_button_with`" `docs/loop/waves/2026-11-09-wave-plan.md:116-117`; `docs/loop/next-wave-plan-draft.md:110-117`.
-
-**What would open it**  
-G1 complete (it is) + A3 picker-app-sites complete (it is, landed `5b38c96` `docs/loop/queue.md:105`). The gate is satisfied; the conversion is the next mechanical step.
+**Current state — corrected 2026-11-24**
+**LANDED `eb2237a9`**: stock `color_button` is now a thin delegate to `color_button_with` with default English labels and per-call empty recents. The duplicate popup body was removed; focused tests 2/2 and full `umber-gui` 151/151 passed, with independent SHIP review. Status/report: `docs/loop/kill-reports/2026-11-23-umber-picker-delegate.md`.
 
 **Concrete next action**  
-Brief the delegate conversion (one file: `crates/umber-gui/src/widgets/color_picker.rs` — replace `color_button` body with a call to `color_button_with` using default `PickerLabels` and a thread-local `RecentColors`), take kill-lock, claw writes, battery, push.
+None. G1, A3, and the delegate conversion are all closed; do not brief a second conversion.
 
 **Worth before v0.1.0 stable?**  
-**Yes, low risk.** It is a cleanup delegate (no behavior change, kittests remain consumers `docs/loop/kill-reports/2026-10-20-a3-picker-app-sites.md:54-70`). Can be done in a post-alpha patch release if time permits, but not a blocker.
+Already landed as a post-alpha hardening cleanup. No open L7 engineering remains.
 
 ---
 
@@ -96,7 +89,7 @@ Monitor upstream. No code work until the gate opens. Keep probes current.
 Gap map source: `docs/research/spp-import-audit-2026-10-16.md:51-110` (gaps 1–10 → requisites R1–R4 `docs/research/spp-import-audit-2026-10-16.md:126-139`).
 
 **What would open each**  
-- R1: corpus f16 channel + decision on `--precision native|8` CLI flag.  
+- R1: native f16/f32 payload planes beside the landed 8-bit preview decode, the corpus tolerance test, and a decision on the `--precision native|8` CLI flag. The f16 READ half is already implemented (`docs/loop/kill-reports/2026-10-16-sppv2-r1-reader.md`); full-precision planes, not preview decoding, are the gap.
 - R2: assbin mesh subset reader (Assimp ASSBIN documented).  
 - R3: generalize QDataStream reader to `Alg::ResourceImage` blobs.  
 - R4: HBO v11/12 registry-family automap schema (the flagship v2 item).
@@ -132,10 +125,10 @@ Enforce in reviews: any PR touching write paths for `.spp`, `.sbsar` execution, 
 
 | Item | Gate | Opener | Next action | Pre-v0.1.0? |
 |------|------|--------|-------------|-------------|
-| 9. R-A2 v3 depth/occlusion | Wave protocol (briefs ready) | Dragon dispatch | Kill-lock `razul-projection-occlusion-w21` → claw | **No** (v3, ROADMAP:238) |
+| 9. R-A2 v3 depth/occlusion | **LANDED `b228767f`** | Closed | No occlusion kill; product questions stay item 10 | Already landed |
 | 10. R-A2 §2.2 product questions | Product decision | Bessa's call | Wait / frame brief if asked | **No** (queued) |
 | 11. L4 winink / wave-stylus-win32 | Windows session + WndProc hook | Partner Windows pen session | Wait for gate | **No** (XI2+Touch ship) |
-| 12. L7 color_button delegate | G1-gated (G1 + A3 done) | Gate satisfied | Brief delegate conversion → kill-lock | **Yes, low risk** |
+| 12. L7 color_button delegate | **LANDED `eb2237a9`** | Closed | No second conversion | Already landed |
 | 13. wave-wasm-shaders/tess/hdr/ray-query | eframe/wgpu upgrade | Upstream feature releases | Monitor | **No** (forward-looking) |
 | 14. .spp R1–R4 import | Fidelity report lanes | Per-R brief + corpus | Wait for prioritization | **No** (v2 fidelity) |
 | 15. Hard walls | Binding rulings | Never | Enforce in review | **N/A** |

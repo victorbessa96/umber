@@ -1,7 +1,9 @@
 # Dogfood + First-Run Walkthrough Prep Brief (Gates 8/C2-24, C2-30)
 
 **Date**: 2026-11-17
-**Context**: v0.1.0-alpha.1 released 2026-11-16 17:34Z (tag `v0.1.0-alpha.1` @ `bc4d642f`). SPEC v1.1 ratified (gate 7 MET). Gates 8 (dogfood C2-24) and 9 (alpha tag C2-25) are Bessa's calls. This brief prepares the dogfood pass and the first-run walkthrough script.
+**Context**: v0.1.0-alpha.1 released 2026-11-16 17:34Z (tag `v0.1.0-alpha.1` @ `bc4d642f`). SPEC v1.1 ratified (gate 7 MET). **Gate 9 is MET**; Gate 8 (dogfood C2-24) remains Bessa's call. This brief prepares the dogfood pass and the first-run walkthrough script.
+
+**2026-11-24 status correction:** Git ancestry proves D2 `533560e8`, D3 `c499255f`, D4 `35097df5`, D5 `752bc991`, and displacement `9e0517bf`/`0654ba48` are **post-alpha**. The published alpha cannot exercise those steps. Use it only for behavior present at `bc4d642f`; use a newer explicit build for the D2–D5/displacement sections below. This document's C2-30 label is the first-run walkthrough, not the closed Windows Ink C2-30 trace.
 
 **Lock**: `razul-dogfood-prep` on `docs/loop/briefs/2026-11-17-dogfood-walkthrough-prep.md`
 
@@ -29,7 +31,7 @@
 
 ---
 
-## 2. New Features to Exercise (D2–D5 + Displacement Preview)
+## 2. Post-Alpha Features to Exercise on a Newer Build (D2–D5 + Displacement Preview)
 
 | Feature | Status | Key UI / Controls | Kill Report / Brief |
 |---------|--------|-------------------|---------------------|
@@ -54,7 +56,7 @@
 
 ## 3. Dogfood Session Plan (Gate 8 / C2-24)
 
-**Goal**: Paint one two-material prop end-to-end using the **new D2–D5 features**, record observations, and verify export round-trip.
+**Goal**: On a **newer explicit build**, paint one two-material prop end-to-end using the **post-alpha D2–D5 features**, record observations, and verify export round-trip. The published alpha is valid only for its tag-contained feature set.
 
 **Test asset**: Bessa's two-material prop (the C2-24 reference). If unavailable, use a two-material FBX with UVs (e.g., generated `cube_uv_ascii7400.fbx` or a simple prop with two texture sets).
 
@@ -91,7 +93,7 @@
 ```
 DOGFOOD SESSION LOG — 2026-11-XX
 Platform: Linux / Windows
-Umber version: v0.1.0-alpha.1 (bc4d642f)
+Umber version: <newer explicit build> (<commit SHA>; required for post-alpha rows)
 Mesh: <name> (<n> texture sets, <n> tiles)
 Output dir: <path>
 
@@ -134,6 +136,8 @@ TIME SPENT: ~XX minutes
 ## 4. First-Run Walkthrough Script (C2-30)
 
 **Goal**: A new user downloads the installer, runs it, opens a mesh, bakes each **new** map (D2–D5), exports, and verifies file sizes. This is the "happy path" for the release announcement / README.
+
+**Build coverage rule (2026-11-24):** the alpha URLs below cover only the `bc4d642f` feature set. Steps 5b–5e and every D2–D5/displacement row require a newer explicit build and its authorized artifact URL; do not record those steps against `v0.1.0-alpha.1`. For an alpha-only walkthrough, stop at tag-contained functionality.
 
 **Audience**: First-time Umber user (technical artist / indie dev). Assumes zero prior Umber knowledge.
 

@@ -122,14 +122,15 @@ Other scripts (`brief-template.sh`, `ci-consume.sh`, `loop-status.sh`, `perf_com
 
 ## Pointers (read the one for your surface before writing code)
 
-- **Requirements:** `docs/specs/requirements.md`, the P0/P1/P2 tier table.
-  - STATE.md records P0 and P1 as closed, but the ✓ marks lag (early-wave rows are unmarked). Don't treat an unmarked row as open work without checking the code.
-  - The remaining **P2** rows:
-    - §2 dynamic material layering
-    - §5 displacement/tessellation preview
-    - §5 custom WGSL user shaders
-    - §6 PSD export
-    - §10 AI-texturing provider interface
+- **Requirements:** `docs/specs/requirements.md`, the P0/P1/P2 tier table and
+  `docs/parity.md`, its generated parity view.
+  - Verify code and the requirements row before treating anything as open work.
+  - Current open or deferred pointers, not a stale future-work list:
+    - §2 full shader-declared dynamic-material sub-stacks; v1 landed `f85cb0aa` + `2c6497ec`.
+    - §5 custom WGSL user shaders.
+    - §5 hardware tessellation/HDR surface upgrade gates; displacement preview landed `9e0517bf`.
+    - §10 actual model/host binding and inference; the provider interface landed `0dbda8e`.
+  - PSD export `40909ea` is landed, not an open row.
 - **Design docs:** `docs/specs/<surface>-design.md`. The filename names the surface (brush-presets, seam-aware-stamping, smudge-clone, udim, i18n, wasm-plugins, cli-batch, …). Non-obvious mappings:
   - node graph → `node-graph-design.md` + `graph-canvas-design.md` + `mtlx-export-design.md`
   - versions and pinning policy → `tech-stack.md`
@@ -137,8 +138,8 @@ Other scripts (`brief-template.sh`, `ci-consume.sh`, `loop-status.sh`, `perf_com
   - perf budgets → `docs/perf/protocol.md`
   - Fill, postfx, HDR and path tools have no design doc; their spec is in the module docs.
 - **GUI:** `docs/specs/gui-audit-and-roadmap.md`.
-  - Phase 0a is done (`umber-gui` exists; the Brush panel migrated).
-  - Next is **0b**: shell chrome, meaning `toolbar.rs` and `status_bar.rs` in umber-app built from umber-gui parts, plus the empty state and the 9 shortcuts.
+  - Phase 0a and **0b** are done; shell chrome landed `ab9af1fa`.
+  - U7 landed the icon rail and collapsible columns through `1fc6ca12` + `89249567`; only the U5 egui 0.37/egui_dock migration remains in that lane.
 - **Session handoff:** STATE.md (status line at the top; the handoff note
   below it). The plan of record for the work order is
   `docs/loop/waves/2026-11-09-wave-plan.md` (the six waves, 2026-11-09);

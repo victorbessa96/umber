@@ -84,10 +84,12 @@ then this page is the instrument.
 adapter). This page KEEPS its Result line: the desktop smoke stays the
 end-to-end instrument; the headless test is the other half.**
 
-## Check 4 — Windows real-pen flags (S1's leg; runs only AFTER the parked fleet lands)
+## Check 4 — Windows real-pen flags (live WndProc/HWND hook + Windows pen required)
 
-Requires the `winink-pen-flags` kill committed (parked, HOST_BACK-gated)
-and a real Windows pen on the Windows build.
+The platform-free `winink-pen-flags` tracker is **LANDED `8d7bf8a0`**.
+The remaining prerequisites are the live WndProc/HWND hand-off and a real
+Windows pen on the Windows build. Passive decode and Linux unit tests do
+not close this smoke.
 
 1. Draw with the pen tip — a normal paint stroke.
 2. Invert the pen (eraser end down) — the stroke erases (an Eraser
@@ -137,3 +139,4 @@ logged. Checks 1–4 remain owed on Bessa's desktop.
 - Doc-only, battery-exempt; no code touched.
 
 - 2026-11-05: check 5 PARTIAL headless — the app runs on the live Wayland session with XDG redirected; control_call.py smoke of methods/command.list/command.run/viewport.screenshot all PASS after `5f3e33f` (repaint waker). SIGTERM exits 143 (no handler) — check 1's quit-guard evidence on this box. Checks 1-4 (real desktop input) still owed on Bessa's desktop.
+- **2026-11-24 supersession:** check 5 is now a full PASS in the Result above; this older PARTIAL line is history, not current status. Checks 1–4 remain owed on Bessa's desktop.
