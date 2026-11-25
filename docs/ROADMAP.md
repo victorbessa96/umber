@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-OBJ material/MTL export is implemented at `d874fa546caef0a6c3cfd3d3d0cf5f61b293dd07`, with brief `3c83c23c` and claim `d489da63`. Passthrough MTL bindings, packed-channel refusal, canonical/symlink containment, concrete per-tile pairs, and previous-MTL plus OBJ-backup rollback are wired through the app, CLI, batch, and agent. R1's per-set suffix and URI/drive findings were fixed; full app is 1,280/0, export 110/0, CLI 159/0, and R2 `deleg_02f5c976` returned SHIP with zero findings. A fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. EyeDepth is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+EyeDepth visibility is implemented at `b62397c2fbe6ad893788f3f5398a07e80f0b1b10`, with brief `078ef410` and claim `28504429`. `EYE_DEPTH_HIT_EPS = 1e-5` names the nearest-hit visibility contract: the nearest positive ray hit selects the surface and a miss produces no dab. Mesh raycast is 8/0, the GPU EyeDepth test is 1/0 with actual nearer-surface paint and byte-identical miss behavior, strict mesh+app clippy is clean, and independent review `deleg_c43df54b` returned SHIP with zero findings. A fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The theme matrix is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

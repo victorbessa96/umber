@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** EyeDepth visibility contract is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-eye-depth`, on committed brief `078ef410d0ed` and queue row 610. Base `b44ca50473cc` was clean and origin-equal, with no live sibling or prior lock. Name the nearest-hit epsilon, pin nearest visible-surface selection and no-hit/no-dab behavior, and prove CPU hit selection matches actual GPU paint readback. No duplicate depth buffer, renderer change, new toggle, second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** EyeDepth visibility is implemented at `b62397c2fbe6ad893788f3f5398a07e80f0b1b10`, on brief `078ef410d0ed` and claim `28504429fbff`; queue row 611 and report `docs/loop/kill-reports/2026-11-25-umber-eye-depth.md`. `EYE_DEPTH_HIT_EPS = 1e-5` names the nearest-hit visibility contract: the nearest positive ray hit selects the surface and a miss produces no dab. Mesh raycast is 8/0, the GPU EyeDepth test is 1/0 with actual nearer-surface paint and byte-identical miss behavior, strict mesh+app clippy is clean, and independent review `deleg_c43df54b` returned SHIP with zero findings. Fresh ad-hoc probe passed 11 targeted tests with clippy and static gates green. Final report/queue hashes and origin verification remain. The theme matrix is next. This status-doc commit releases `razul-eye-depth`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
