@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The 8K COW A/B is **deferred** with independent SHIP (`deleg_106ff052`). Actual 8192² measurements: full_one is 2.000× smaller, full_three and small_three are only 1.333× smaller, below the pre-registered 1.5× adoption threshold. Latency is better in every case, but it does not meet the memory rule. The temporary probe was removed; only report/status docs land. A fresh final probe passed 47 targeted tests with final-byte equality, clippy, and static gates green. Origin read-back reached `5fe16d1d3d261c7585ceee2b84c485b21bc48d85`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** late material-picker acceptance coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-material-picker-coverage`, on committed brief `e08bdada24f4` and queue row 617. Base `857886f57633` was clean and origin-equal, with no live sibling or prior lock. Add active preservation, non-fill/no-op, and declared-but-unmaterialized exclusion tests from the late R1 finding. No production behavior changes. Independent review, report, safe-push, and origin verify.
 
 
 ## Historical coordination snapshots (append-only; not current status)
