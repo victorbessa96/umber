@@ -3598,6 +3598,80 @@ mod tests {
     }
 
     #[test]
+    fn eye_depth_nearest_visible_surface_drives_stroke_and_miss_writes_nothing() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 1024).expect("paint builds");
+        paint.set_brush_color([1.0, 0.0, 0.0, 1.0]);
+        paint.set_brush_size(0.5);
+        let mut mesh = quad();
+        // The far surface uses UV .25; the nearer z=2 surface uses UV .75,
+        // so the selected hit is visible in both the returned UV and pixels.
+        mesh.uvs.fill([0.25, 0.25]);
+        let base = mesh.positions.len() as u32;
+        for (p, uv) in [
+            ([-1.0, -1.0, 2.0], [0.5, 0.5]),
+            ([1.0, -1.0, 2.0], [1.0, 0.5]),
+            ([1.0, 1.0, 2.0], [1.0, 1.0]),
+            ([-1.0, 1.0, 2.0], [0.5, 1.0]),
+        ] {
+            mesh.positions.push(p);
+            mesh.normals.push([0.0, 0.0, 1.0]);
+            mesh.uvs.push(uv);
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let origin = glam::Vec3::new(0.0, 0.0, 5.0);
+        let dir = glam::Vec3::new(0.0, 0.0, -1.0);
+        let hit = umber_mesh::ray_intersect(&mesh, origin, dir).expect("nearer hit");
+        assert_eq!(hit.triangle, 2, "the z=2 quad wins visibility");
+        let expected_uv = umber_mesh::uv_at(&mesh, hit).expect("nearer UV");
+        assert_eq!(expected_uv, [0.75, 0.75]);
+
+        let mut viewport = painting_viewport();
+        viewport.mesh_data = Some(mesh);
+        let rect = rect200();
+        for i in 0..16 {
+            let pos = egui::pos2(100.0 + 0.5 * i as f32, 100.0);
+            let uv = viewport
+                .stroke_event(rect, &mut paint, pos, 1.0)
+                .expect("stroke resolves to the nearest visible surface");
+            if i == 0 {
+                assert_uv(
+                    uv,
+                    expected_uv[0],
+                    expected_uv[1],
+                    "nearest visible surface",
+                );
+            } else {
+                assert!(
+                    uv[0] >= 0.5 && uv[1] >= 0.5,
+                    "the hit stays on the nearer quad: {uv:?}"
+                );
+            }
+        }
+        let image = paint.read_tile(1001).expect("EyeDepth tile readback");
+        let x = (expected_uv[0] * (image.width - 1) as f32).round() as u32;
+        let y = ((1.0 - expected_uv[1]) * (image.height - 1) as f32).round() as u32;
+        let at = (y * image.width + x) as usize * 4;
+        assert!(
+            image.data[at + 3] > 0,
+            "the nearest visible surface is painted at texel ({x}, {y})"
+        );
+        let before = image.data;
+
+        // A miss is a no-op, not a phantom dab or a panic.
+        assert_eq!(
+            viewport.stroke_event(rect, &mut paint, egui::pos2(198.0, 198.0), 1.0),
+            None,
+            "off-mesh pointer misses"
+        );
+        let after = paint.read_tile(1001).expect("post-miss readback");
+        assert_eq!(before, after.data, "a miss leaves the tile bytes unchanged");
+    }
+
+    #[test]
     fn the_staged_dabs_read_back_mid_stroke_at_the_start_camera_uvs() {
         // Pin 3 (GPU-gated): the preview stays live. A real stroke through
         // `stroke_event` (head-on, x 80 → 82 px), then the camera rotates

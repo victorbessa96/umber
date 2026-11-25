@@ -8,6 +8,11 @@
 use crate::MeshData;
 use glam::Vec3;
 
+/// EyeDepth hit epsilon: a ray hit must be strictly farther than this to
+/// count as camera-visible. At or below it, the hit is behind the eye or
+/// epsilon-touching and contributes no dab.
+pub const EYE_DEPTH_HIT_EPS: f32 = 1e-5;
+
 /// A ray hit: the intersected triangle index, distance along the ray,
 /// and the barycentric hit point (for attribute interpolation).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,7 +39,9 @@ pub fn interpolate_attr<T: Copy>(
     Some(lerp(*a, *b, *c, hit.bary.0, hit.bary.1))
 }
 
-/// Casts `ray` against the mesh, returning the nearest hit.
+/// Casts `ray` against the mesh, returning the nearest hit beyond
+/// [`EYE_DEPTH_HIT_EPS`]. This nearest positive hit is the 3D stroke's
+/// camera-visibility mask: a nearer surface wins, and no hit means no dab.
 ///
 /// `dir` need not be normalized; `t` is in the ray's own units.
 pub fn ray_intersect(mesh: &MeshData, origin: Vec3, dir: Vec3) -> Option<RayHit> {
@@ -74,7 +81,7 @@ pub fn ray_intersect(mesh: &MeshData, origin: Vec3, dir: Vec3) -> Option<RayHit>
             continue;
         }
         let t = f * edge2.dot(q);
-        if t <= 1e-5 {
+        if t <= EYE_DEPTH_HIT_EPS {
             continue; // Behind origin or epsilon-touching.
         }
         if best.is_none_or(|b| t < b.t) {
@@ -279,6 +286,27 @@ mod tests {
         let hit =
             ray_intersect(&mesh, Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("hit");
         assert_eq!(hit.triangle, 2, "the z=2 quad (second pair) must win");
+    }
+
+    #[test]
+    fn eye_depth_epsilon_rejects_at_and_below_threshold() {
+        let mesh = quad();
+        for (name, origin, expected) in [
+            ("below", EYE_DEPTH_HIT_EPS * 0.5, false),
+            ("at", EYE_DEPTH_HIT_EPS, false),
+            ("above", EYE_DEPTH_HIT_EPS * 2.0, true),
+        ] {
+            let hit = ray_intersect(
+                &mesh,
+                Vec3::new(0.0, 0.0, origin),
+                Vec3::new(0.0, 0.0, -1.0),
+            );
+            assert_eq!(hit.is_some(), expected, "{name}: {hit:?}");
+        }
+        // The ordinary positive hit remains the nearest visible surface.
+        let hit = ray_intersect(&mesh, Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0))
+            .expect("positive hit");
+        assert!((hit.t - 5.0).abs() < 1e-6, "positive hit depth {}", hit.t);
     }
 
     #[test]
