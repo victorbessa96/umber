@@ -12,6 +12,7 @@ Base: theme-matrix status tip `b772f8191d3942c85fb5ecd33fa1bffc80346e6f`, clean 
 - Add a temporary test-only A/B probe to `retouch.rs` that compares the real `record_stroke` path against a sparse 64×64 COW prototype using `Arc<Vec<u8>>` and block-local clones.
 - Measure three cases at 8192²: one full-tile stroke, three overlapping full-tile strokes, and three overlapping 64×64 strokes. Record baseline bytes, COW bytes, and median elapsed microseconds for each.
 - Assert final bytes match between the two models, then remove the temporary probe before committing only the report/status surfaces. No production COW implementation is retained.
+- **Decision rule (pre-registered):** adopt COW only when its history bytes are at least **1.5× smaller** than the real dirty-journal baseline at no worse than **1.25× median latency**. Otherwise defer. Report the exact ratios, not a generic win.
 
 ## Failure handling
 
