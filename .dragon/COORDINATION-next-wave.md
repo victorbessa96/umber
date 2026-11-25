@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** the 8K COW A/B is measured and **deferred** with independent SHIP (`deleg_106ff052`). Brief `e9f14c288b07`, claim `3d0bdc150c22`, queue row 615 and report `docs/loop/kill-reports/2026-11-25-umber-cow-ab.md`. Actual 8192² measurements: full_one is 2.000× smaller, full_three and small_three are only 1.333× smaller, below the pre-registered 1.5× adoption threshold. Latency is better in every case, but it does not meet the memory rule. The temporary probe was removed; only report/status docs land. A fresh final probe passed 47 targeted tests with final-byte equality, clippy, and static gates green. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-cow-ab`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The 8K COW A/B is **deferred** with independent SHIP (`deleg_106ff052`). Actual 8192² measurements: full_one is 2.000× smaller, full_three and small_three are only 1.333× smaller, below the pre-registered 1.5× adoption threshold. Latency is better in every case, but it does not meet the memory rule. The temporary probe was removed; only report/status docs land. A fresh final probe passed 47 targeted tests with final-byte equality, clippy, and static gates green. Origin read-back reached `5fe16d1d3d261c7585ceee2b84c485b21bc48d85`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
