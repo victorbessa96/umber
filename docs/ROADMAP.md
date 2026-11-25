@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-All code-ready lanes are landed and origin-verified. The late OBJ writer failure coverage is implemented at `adcf99d7da0e678bbf87e382d29d8e661f087ca9` with replacement review SHIP and a 9-test filter. Origin read-back reached `16465e9dae7f435ddb22641651295930ad5015ff`. Only genuine human/product/platform gates remain; the complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+The late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f`, with brief `ec5aaa2f` and claim `eacba075`. Document-level divisibility and fresh nonexistent-directory writer assertions are pinned with no production behavior changes. GLB filter is 4/0, strict export clippy is clean, and independent review `deleg_15967586` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

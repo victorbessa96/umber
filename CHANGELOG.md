@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Tested — late GLB writer failure coverage:** `c3565fe7` pins document-level divisibility and fresh nonexistent-directory writer assertions for invalid geometry. No production behavior changes. GLB filter 4/0, strict export clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-glb-writer-coverage.md`.
+
 - **Tested — late OBJ writer failure coverage:** `adcf99d7` pins writer-level ragged no-directory assertions and the create_dir_all failure branch. No production behavior changes. OBJ filter 9/0, strict export clippy, and replacement review SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-obj-writer-coverage.md`.
 
 - **Tested — late Assets mesh acceptance coverage:** `35f12d32` isolates mesh no-match below the Meshes header and pins exact bundled→exe→extra ordering with built-in aliases. No production behavior changes. Mesh filter 32/0, strict app clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-assets-mesh-coverage.md`.

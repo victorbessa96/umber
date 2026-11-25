@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** late GLB writer failure coverage is CLAIMED by session `20261124_193811_e97c1e` under lock `razul-glb-writer-coverage`, on committed brief `ec5aaa2f6ad0` and queue row 626. Base `2c3cb1afa91e` was clean and origin-equal, with no live sibling or prior lock. Document-level non-multiple `[0,1,2,0]` divisibility case and fresh nonexistent-directory writer assertions for invalid geometry. No production behavior changes. Independent review, report, safe-push, and origin verify.
+**Updated 2026-11-25:** late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f`, on brief `ec5aaa2f6ad0` and claim `eacba075ecbc`; queue row 627 and report `docs/loop/kill-reports/2026-11-25-umber-glb-writer-coverage.md`. Document-level divisibility and fresh nonexistent-directory writer assertions are pinned with no production behavior changes. GLB filter is 4/0, strict export clippy is clean, and independent review `deleg_15967586` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. This status-doc commit releases `razul-glb-writer-coverage`; safe-push and `git ls-remote` remain the origin gate. No second kill, release, centralhost, or public-PR scope.
 
 
 ## Historical coordination snapshots (append-only; not current status)
