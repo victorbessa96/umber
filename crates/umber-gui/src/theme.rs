@@ -60,6 +60,8 @@ pub enum Theme {
     /// Umber Dark: the warm-neutral dark chrome ([`palette`]).
     #[default]
     Dark,
+    /// Umber Dim: a mid-dark neutral between Dark and Light.
+    Dim,
     /// Umber Light: the same ember accent, deepened for light surfaces.
     Light,
     /// High Contrast: black chrome, white text, a bright accent; every
@@ -68,13 +70,14 @@ pub enum Theme {
 }
 
 impl Theme {
-    /// Every theme, in menu order.
-    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::HighContrast];
+    /// Every theme, in menu order: four brightness levels.
+    pub const ALL: [Self; 4] = [Self::Dark, Self::Dim, Self::Light, Self::HighContrast];
 
     /// The persisted name (`theme=` in the preferences file).
     pub fn name(self) -> &'static str {
         match self {
             Self::Dark => "dark",
+            Self::Dim => "dim",
             Self::Light => "light",
             Self::HighContrast => "high-contrast",
         }
@@ -89,6 +92,7 @@ impl Theme {
     pub fn tokens(self) -> Tokens {
         match self {
             Self::Dark => Tokens::DARK,
+            Self::Dim => Tokens::DIM,
             Self::Light => Tokens::LIGHT,
             Self::HighContrast => Tokens::HIGH_CONTRAST,
         }
@@ -97,6 +101,98 @@ impl Theme {
     /// Whether the theme's surfaces are dark (egui's `dark_mode`).
     pub fn is_dark(self) -> bool {
         !matches!(self, Self::Light)
+    }
+
+    /// The base tokens with one of the seven matrix accents applied.
+    pub fn tokens_with_accent(self, accent: Accent) -> Tokens {
+        let mut tokens = self.tokens();
+        tokens.accent = accent.color(self);
+        tokens
+    }
+}
+
+/// One accent of the 4 brightness x 7 accent theme matrix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Accent {
+    /// The existing ember-orange accent (compatibility default).
+    #[default]
+    Ember,
+    /// Warm amber-yellow.
+    Amber,
+    /// Cool azure-blue.
+    Azure,
+    /// Verdant green.
+    Verdant,
+    /// Violet-purple.
+    Violet,
+    /// Crimson-red.
+    Crimson,
+    /// Cyan-teal.
+    Cyan,
+}
+
+impl Accent {
+    /// Every accent, in menu order.
+    pub const ALL: [Self; 7] = [
+        Self::Ember,
+        Self::Amber,
+        Self::Azure,
+        Self::Verdant,
+        Self::Violet,
+        Self::Crimson,
+        Self::Cyan,
+    ];
+
+    /// The persisted name (`accent=` in the preferences file).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ember => "ember",
+            Self::Amber => "amber",
+            Self::Azure => "azure",
+            Self::Verdant => "verdant",
+            Self::Violet => "violet",
+            Self::Crimson => "crimson",
+            Self::Cyan => "cyan",
+        }
+    }
+
+    /// The accent a persisted name names, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name.trim())
+    }
+
+    /// This accent's explicit color for one brightness level.
+    pub fn color(self, theme: Theme) -> Color32 {
+        match (theme, self) {
+            (Theme::Dark, Self::Ember) => palette::ACCENT,
+            (Theme::Dim, Self::Ember) => Color32::from_rgb(0xFF, 0x9A, 0x3D),
+            (Theme::Light, Self::Ember) => Tokens::LIGHT.accent,
+            (Theme::HighContrast, Self::Ember) => Tokens::HIGH_CONTRAST.accent,
+            (Theme::Dark, Self::Amber) => Color32::from_rgb(0xFF, 0xC9, 0x4D),
+            (Theme::Dim, Self::Amber) => Color32::from_rgb(0xFF, 0xD8, 0x66),
+            (Theme::Light, Self::Amber) => Color32::from_rgb(0x8A, 0x5A, 0x00),
+            (Theme::HighContrast, Self::Amber) => Color32::from_rgb(0xFF, 0xD2, 0x4D),
+            (Theme::Dark, Self::Azure) => Color32::from_rgb(0x63, 0xB3, 0xFF),
+            (Theme::Dim, Self::Azure) => Color32::from_rgb(0x80, 0xC0, 0xFF),
+            (Theme::Light, Self::Azure) => Color32::from_rgb(0x1D, 0x5F, 0xBF),
+            (Theme::HighContrast, Self::Azure) => Color32::from_rgb(0x80, 0xC0, 0xFF),
+            (Theme::Dark, Self::Verdant) => Color32::from_rgb(0x4A, 0xD9, 0x91),
+            (Theme::Dim, Self::Verdant) => Color32::from_rgb(0x6C, 0xE3, 0xA5),
+            (Theme::Light, Self::Verdant) => Color32::from_rgb(0x1E, 0x7A, 0x45),
+            (Theme::HighContrast, Self::Verdant) => Color32::from_rgb(0x5C, 0xF0, 0x96),
+            (Theme::Dark, Self::Violet) => Color32::from_rgb(0xC3, 0x9A, 0xFF),
+            (Theme::Dim, Self::Violet) => Color32::from_rgb(0xD4, 0xB2, 0xFF),
+            (Theme::Light, Self::Violet) => Color32::from_rgb(0x7A, 0x3E, 0xBF),
+            (Theme::HighContrast, Self::Violet) => Color32::from_rgb(0xD4, 0xB2, 0xFF),
+            (Theme::Dark, Self::Crimson) => Color32::from_rgb(0xFF, 0x6B, 0x70),
+            (Theme::Dim, Self::Crimson) => Color32::from_rgb(0xFF, 0x85, 0x8A),
+            (Theme::Light, Self::Crimson) => Color32::from_rgb(0xB8, 0x2E, 0x26),
+            (Theme::HighContrast, Self::Crimson) => Color32::from_rgb(0xFF, 0x80, 0x78),
+            (Theme::Dark, Self::Cyan) => Color32::from_rgb(0x4D, 0xD6, 0xD6),
+            (Theme::Dim, Self::Cyan) => Color32::from_rgb(0x70, 0xE0, 0xE0),
+            (Theme::Light, Self::Cyan) => Color32::from_rgb(0x00, 0x7A, 0x7A),
+            (Theme::HighContrast, Self::Cyan) => Color32::from_rgb(0x70, 0xE0, 0xE0),
+        }
     }
 }
 
@@ -144,6 +240,23 @@ impl Tokens {
         warn: palette::WARN,
         error: palette::ERROR,
         viewport: palette::VIEWPORT,
+    };
+
+    /// Umber Dim: a mid-dark neutral with text and accent contrast kept
+    /// above the same floors as Dark, without going full Light.
+    pub const DIM: Self = Self {
+        bg: Color32::from_rgb(0x30, 0x34, 0x3B),
+        panel: Color32::from_rgb(0x3B, 0x40, 0x48),
+        raised: Color32::from_rgb(0x4A, 0x4F, 0x59),
+        hover: Color32::from_rgb(0x5A, 0x60, 0x6B),
+        text: Color32::from_rgb(0xF0, 0xF1, 0xF3),
+        text_muted: Color32::from_rgb(0xC2, 0xC6, 0xCE),
+        text_faint: Color32::from_rgb(0xBC, 0xC2, 0xCC),
+        accent: Color32::from_rgb(0xFF, 0x9A, 0x3D),
+        success: Color32::from_rgb(0x5B, 0xD5, 0x8C),
+        warn: Color32::from_rgb(0xF0, 0xB9, 0x5A),
+        error: Color32::from_rgb(0xF0, 0x76, 0x6C),
+        viewport: Color32::from_rgb(0x26, 0x2A, 0x31),
     };
 
     /// Umber Light: warm off-white surfaces, near-black text, the ember
@@ -213,6 +326,7 @@ pub fn active_theme() -> Theme {
     match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
         1 => Theme::Light,
         2 => Theme::HighContrast,
+        3 => Theme::Dim,
         _ => Theme::Dark,
     }
 }
@@ -222,13 +336,31 @@ fn set_active_theme(theme: Theme) {
         Theme::Dark => 0,
         Theme::Light => 1,
         Theme::HighContrast => 2,
+        Theme::Dim => 3,
     };
     ACTIVE_THEME.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The active theme's tokens.
+/// The active accent, Ember until [`apply_matrix`] selects another.
+static ACTIVE_ACCENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The active accent selected by [`apply_matrix`].
+pub fn active_accent() -> Accent {
+    let index = ACTIVE_ACCENT.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    Accent::ALL.get(index).copied().unwrap_or(Accent::Ember)
+}
+
+fn set_active_accent(accent: Accent) {
+    let index = Accent::ALL
+        .iter()
+        .position(|candidate| *candidate == accent)
+        .unwrap_or(0);
+    ACTIVE_ACCENT.store(index as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The active theme's tokens with the active accent applied.
 pub fn tokens() -> Tokens {
-    active_theme().tokens()
+    active_theme().tokens_with_accent(active_accent())
 }
 
 /// The 2D canvas colours (the UV view's padding, the UV square, the
@@ -259,6 +391,13 @@ impl Theme {
                 tile_dim: Color32::from_rgb(32, 32, 36),
                 label: Color32::from_rgb(0x8C, 0x94, 0x9E),
                 grid: Color32::from_rgb(55, 58, 64),
+            },
+            Self::Dim => CanvasColors {
+                pad: Color32::from_rgb(0x26, 0x2A, 0x31),
+                square: Color32::from_rgb(0x3B, 0x40, 0x48),
+                tile_dim: Color32::from_rgb(0x33, 0x38, 0x40),
+                label: Color32::from_rgb(0xD0, 0xD4, 0xDA),
+                grid: Color32::from_rgb(0x70, 0x76, 0x80),
             },
             Self::Light => CanvasColors {
                 pad: Color32::from_rgb(0x3A, 0x3C, 0x40),
@@ -540,9 +679,19 @@ pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
 }
 
 /// The style for `theme` (no live overrides): the per-theme builder the
-/// tests and [`apply_theme`] share.
+/// tests and [`apply_theme`] share. Compatibility default: Ember.
 pub fn themed_style(theme: Theme, density: Density, text_scale: f32) -> egui::Style {
-    style_with_visuals(visuals_for(theme, None), density, text_scale)
+    themed_matrix_style(theme, Accent::Ember, density, text_scale)
+}
+
+/// The style for one of the 28 brightness/accent combinations.
+pub fn themed_matrix_style(
+    theme: Theme,
+    accent: Accent,
+    density: Density,
+    text_scale: f32,
+) -> egui::Style {
+    style_with_visuals(visuals_for(theme, accent, None), density, text_scale)
 }
 
 /// [`umber_style_scaled`] with the live [`TokenOverrides`] on `ctx`
@@ -658,12 +807,15 @@ pub fn token_overrides(ctx: &egui::Context) -> TokenOverrides {
 }
 
 /// `name`'s color in `theme`: the live override when present, else the
-/// theme's token.
-fn token(theme: Theme, ov: Option<&TokenOverrides>, name: &str) -> Color32 {
+/// selected accent for `accent`, else the theme's token.
+fn token(theme: Theme, accent: Accent, ov: Option<&TokenOverrides>, name: &str) -> Color32 {
     if let Some(ov) = ov {
         if let Some(c) = ov.get(name) {
             return *c;
         }
+    }
+    if name == "accent" {
+        return accent.color(theme);
     }
     theme.tokens().get(name).unwrap_or(Color32::BLACK)
 }
@@ -677,9 +829,22 @@ pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
     ctx.set_style_of(egui::Theme::Light, style);
 }
 
-/// Makes `theme` the active theme (the token helpers read it) and
-/// installs its style on both OS-theme branches, as [`apply`] does.
+/// Makes `theme` the active theme with the compatibility Ember accent
+/// and installs its style on both OS-theme branches, as [`apply`] does.
 pub fn apply_theme(ctx: &egui::Context, theme: Theme, density: Density, text_scale: f32) {
+    apply_matrix(ctx, theme, Accent::Ember, density, text_scale);
+}
+
+/// Makes one of the 28 brightness/accent combinations active and installs
+/// its style on both OS-theme branches, as [`apply`] does.
+pub fn apply_matrix(
+    ctx: &egui::Context,
+    theme: Theme,
+    accent: Accent,
+    density: Density,
+    text_scale: f32,
+) {
+    set_active_accent(accent);
     set_active_theme(theme);
     apply(ctx, density, text_scale);
 }
@@ -719,25 +884,26 @@ pub fn paint_focus_ring(ui: &egui::Ui, response: &egui::Response) -> bool {
 
 /// The Umber visuals with the live [`TokenOverrides`] on `ctx`.
 fn umber_visuals(ctx: &egui::Context) -> egui::Visuals {
-    visuals_for(active_theme(), Some(&token_overrides(ctx)))
+    visuals_for(active_theme(), active_accent(), Some(&token_overrides(ctx)))
 }
 
 fn umber_visuals_compiled() -> egui::Visuals {
-    visuals_for(active_theme(), None)
+    visuals_for(active_theme(), active_accent(), None)
 }
 
 /// The Umber visuals for `theme`: egui's stock dark or light as the base
 /// (per [`Theme::is_dark`]), every color re-authored from the theme's
-/// tokens. `ov` (the live token overrides, debug-only) recolors them.
-fn visuals_for(theme: Theme, ov: Option<&TokenOverrides>) -> egui::Visuals {
-    let c_bg = token(theme, ov, "bg");
-    let c_panel = token(theme, ov, "panel");
-    let c_raised = token(theme, ov, "raised");
-    let c_hover = token(theme, ov, "hover");
-    let c_text = token(theme, ov, "text");
-    let c_accent = token(theme, ov, "accent");
-    let c_warn = token(theme, ov, "warn");
-    let c_error = token(theme, ov, "error");
+/// tokens and selected accent. `ov` (the live token overrides,
+/// debug-only) recolors them last.
+fn visuals_for(theme: Theme, accent: Accent, ov: Option<&TokenOverrides>) -> egui::Visuals {
+    let c_bg = token(theme, accent, ov, "bg");
+    let c_panel = token(theme, accent, ov, "panel");
+    let c_raised = token(theme, accent, ov, "raised");
+    let c_hover = token(theme, accent, ov, "hover");
+    let c_text = token(theme, accent, ov, "text");
+    let c_accent = token(theme, accent, ov, "accent");
+    let c_warn = token(theme, accent, ov, "warn");
+    let c_error = token(theme, accent, ov, "error");
     let dark = theme.is_dark();
     let mut v = if dark {
         egui::Visuals::dark()
@@ -797,9 +963,9 @@ fn visuals_for(theme: Theme, ov: Option<&TokenOverrides>) -> egui::Visuals {
         // Disabled labels and placeholders stay at 7:1 or better on
         // black (egui's defaults halve the text: about 5:1 here).
         v.disabled_alpha = 0.75;
-        v.weak_text_color = Some(token(theme, ov, "text_faint"));
+        v.weak_text_color = Some(token(theme, accent, ov, "text_faint"));
         // Every interactive edge drawn: no fill-only affordances.
-        let edge = Stroke::new(1.0, token(theme, ov, "text_faint"));
+        let edge = Stroke::new(1.0, token(theme, accent, ov, "text_faint"));
         w.inactive.bg_stroke = edge;
         w.noninteractive.bg_stroke = edge;
         v.window_stroke = edge;
@@ -997,7 +1163,7 @@ mod tests {
             }
             // egui's weak (disabled/placeholder) color is measured, not
             // assumed: it must clear the text floor too (F5).
-            let v = visuals_for(t, None);
+            let v = visuals_for(t, Accent::Ember, None);
             let weak = v.weak_text_color.unwrap_or(v.text_color());
             assert!(
                 contrast_ratio(weak, k.panel) >= 4.5,
@@ -1021,13 +1187,13 @@ mod tests {
         let d = Theme::Dark.canvas();
         assert_eq!(d.square, Color32::from_rgb(38, 38, 42));
         assert_eq!(d.pad, Color32::from_rgb(28, 28, 30));
-        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
+        for t in Theme::ALL {
             let c = t.canvas();
             assert!(contrast_ratio(c.label, c.square) >= 4.5, "{t:?} label");
         }
         // Grid lines are 0.5 px guides, not text: 1.5:1 where the canvas
         // is light, still visible (>= 1.0) on the Dark original constants.
-        for t in [Theme::Light, Theme::HighContrast] {
+        for t in [Theme::Dim, Theme::Light, Theme::HighContrast] {
             let c = t.canvas();
             assert!(contrast_ratio(c.grid, c.square) >= 1.5, "{t:?} grid");
         }
@@ -1058,6 +1224,32 @@ mod tests {
             themed_style(Theme::Dark, Density::Comfortable, 1.0).visuals,
             umber_style(Density::Comfortable).visuals
         );
+    }
+
+    #[test]
+    fn matrix_has_28_combinations_and_clears_accent_contrast() {
+        let mut count = 0;
+        for theme in Theme::ALL {
+            for accent in Accent::ALL {
+                count += 1;
+                let tokens = theme.tokens_with_accent(accent);
+                assert_eq!(tokens.accent, accent.color(theme));
+                let contrast = contrast_ratio(tokens.accent, tokens.panel);
+                assert!(
+                    contrast >= 3.0,
+                    "{theme:?}/{accent:?}: {contrast} on {:?}",
+                    tokens.panel
+                );
+                let style = themed_matrix_style(theme, accent, Density::Comfortable, 1.0);
+                assert_eq!(style.visuals.widgets.active.bg_stroke.color, tokens.accent);
+            }
+        }
+        assert_eq!(count, 28);
+        for accent in Accent::ALL {
+            assert_eq!(Accent::from_name(accent.name()), Some(accent));
+        }
+        assert_eq!(Theme::from_name("dim"), Some(Theme::Dim));
+        assert_eq!(Theme::Dim.name(), "dim");
     }
 
     /// U4: `motion_secs` follows the style, so Reduce Motion's 0 reaches

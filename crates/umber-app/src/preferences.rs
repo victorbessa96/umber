@@ -140,10 +140,12 @@ pub struct Preferences {
     /// The brush asset shelf along the viewport's bottom (UI/UX pass
     /// U3; on by default).
     pub brush_shelf: bool,
-    /// The UI theme (UI/UX pass U4): Dark (default), Light, High
-    /// Contrast. `None` = follow the OS appearance (Quick Setup's
-    /// "Follow OS"), resolved to Dark / Light per frame.
+    /// The UI brightness (UI/UX pass U4 + theme matrix): Dark (default),
+    /// Dim, Light, High Contrast. `None` = follow the OS appearance,
+    /// resolved to Dark / Light per frame.
     pub theme: Option<umber_gui::Theme>,
+    /// The accent of the theme matrix, Ember by default.
+    pub accent: umber_gui::Accent,
     /// The viewport navigation preset.
     pub nav: NavPreset,
     /// Wheel zoom inverted (wheel up zooms out).
@@ -170,6 +172,7 @@ impl Default for Preferences {
             show_fps: false,
             brush_shelf: true,
             theme: Some(umber_gui::Theme::Dark),
+            accent: umber_gui::Accent::Ember,
             nav: NavPreset::default(),
             nav_wheel_invert: false,
             keymap_overrides: Overrides::default(),
@@ -198,7 +201,7 @@ impl Preferences {
             serde_json::to_string(&bindings_v2::serialize_overrides_v2(&self.keymap_overrides))
                 .unwrap_or_else(|_| "{}".to_string());
         format!(
-            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nshow_fps={}\nbrush_shelf={}\ntheme={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nshow_fps={}\nbrush_shelf={}\ntheme={}\naccent={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
             self.ui_scale_default,
@@ -209,6 +212,7 @@ impl Preferences {
             self.show_fps,
             self.brush_shelf,
             self.theme.map_or("follow-os", umber_gui::Theme::name),
+            self.accent.name(),
             nav_name(self.nav),
             self.nav_wheel_invert,
             self.keymap_overrides.serialize(),
@@ -264,6 +268,11 @@ impl Preferences {
                         p.theme = None;
                     } else if let Some(t) = umber_gui::Theme::from_name(v) {
                         p.theme = Some(t);
+                    }
+                }
+                "accent" => {
+                    if let Some(a) = umber_gui::Accent::from_name(v) {
+                        p.accent = a;
                     }
                 }
                 "nav" => p.nav = NavPreset::from_name(v).unwrap_or(p.nav),
@@ -938,6 +947,7 @@ mod tests {
             show_fps: true,
             brush_shelf: false,
             theme: Some(umber_gui::Theme::HighContrast),
+            accent: umber_gui::Accent::Ember,
             nav: NavPreset::Blender,
             keymap_overrides: actions::blender_overrides(),
             prop_keymap: actions::PropKeymap::default(),
@@ -955,11 +965,16 @@ mod tests {
         for t in [
             None,
             Some(umber_gui::Theme::Dark),
+            Some(umber_gui::Theme::Dim),
             Some(umber_gui::Theme::Light),
             Some(umber_gui::Theme::HighContrast),
         ] {
             p.theme = t;
             assert_eq!(Preferences::parse(&p.serialize()).theme, t);
+        }
+        for accent in umber_gui::Accent::ALL {
+            p.accent = accent;
+            assert_eq!(Preferences::parse(&p.serialize()).accent, accent);
         }
         assert_eq!(
             Preferences::parse("theme=neon\n").theme,

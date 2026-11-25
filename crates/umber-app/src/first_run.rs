@@ -46,13 +46,21 @@ pub enum SetupTheme {
     Light,
     /// Force the dark palette.
     Dark,
+    /// Force the mid-dark palette (theme matrix).
+    Dim,
     /// The high-contrast palette (UI/UX pass U4).
     HighContrast,
 }
 
 impl SetupTheme {
     /// Every variant in combo order.
-    pub const ALL: [Self; 4] = [Self::FollowOs, Self::Light, Self::Dark, Self::HighContrast];
+    pub const ALL: [Self; 5] = [
+        Self::FollowOs,
+        Self::Light,
+        Self::Dark,
+        Self::Dim,
+        Self::HighContrast,
+    ];
 
     /// The `Preferences::theme` this choice writes (`None` = follow the
     /// OS). Before U4 the choice set egui's own light/dark preference,
@@ -63,6 +71,7 @@ impl SetupTheme {
             Self::FollowOs => None,
             Self::Light => Some(umber_gui::Theme::Light),
             Self::Dark => Some(umber_gui::Theme::Dark),
+            Self::Dim => Some(umber_gui::Theme::Dim),
             Self::HighContrast => Some(umber_gui::Theme::HighContrast),
         }
     }
@@ -75,6 +84,7 @@ impl SetupTheme {
             None => Self::FollowOs,
             Some(umber_gui::Theme::Light) => Self::Light,
             Some(umber_gui::Theme::Dark) => Self::Dark,
+            Some(umber_gui::Theme::Dim) => Self::Dim,
             Some(umber_gui::Theme::HighContrast) => Self::HighContrast,
         }
     }
@@ -170,6 +180,7 @@ impl QuickSetup {
                     SetupTheme::FollowOs => tr("setup.theme-follow-os"),
                     SetupTheme::Light => tr("setup.theme-light"),
                     SetupTheme::Dark => tr("setup.theme-dark"),
+                    SetupTheme::Dim => tr("setup.theme-dim"),
                     SetupTheme::HighContrast => tr("setup.theme-high-contrast"),
                 };
                 ComboBox::from_id_salt("setup-theme")

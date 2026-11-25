@@ -2439,6 +2439,8 @@ pub struct UmberApp {
     /// The theme the installed style was built for (U4): a preference
     /// change or an OS appearance flip under Follow OS re-applies.
     applied_theme: Option<umber_gui::Theme>,
+    /// The accent of the theme matrix the installed style was built for.
+    applied_accent: Option<umber_gui::Accent>,
     /// Debug-only live theme reload (g0-style): `UMBER_THEME_FILE`, polled
     /// every 400 ms in `fn ui`.
     #[cfg(debug_assertions)]
@@ -2681,6 +2683,7 @@ impl UmberApp {
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
             applied_theme: None,
+            applied_accent: None,
             #[cfg(debug_assertions)]
             theme_file: std::env::var_os("UMBER_THEME_FILE").map(Into::into),
             #[cfg(debug_assertions)]
@@ -2785,6 +2788,7 @@ impl UmberApp {
                     let show_fps = tr("prefs.show-fps");
                     let brush_shelf = tr("prefs.brush-shelf");
                     let theme_label = tr("prefs.theme");
+                    let accent_label = tr("prefs.accent");
                     let navigation = tr("prefs.section-navigation");
                     let nav = tr("prefs.nav-preset");
                     let any =
@@ -2798,16 +2802,19 @@ impl UmberApp {
                         &motion,
                         &hints,
                         &theme_label,
+                        &accent_label,
                     ]) {
                         ui.strong(&interface);
                         // U4: the theme (Follow OS / Dark / Light / High
                         // Contrast); the frame's theme check applies it.
                         if preferences::row_matches(&q, &theme_label)
+                            || preferences::row_matches(&q, &accent_label)
                             || preferences::row_matches(&q, &interface)
                         {
                             let name = |t: Option<umber_gui::Theme>| match t {
                                 None => tr("setup.theme-follow-os"),
                                 Some(umber_gui::Theme::Dark) => tr("setup.theme-dark"),
+                                Some(umber_gui::Theme::Dim) => tr("setup.theme-dim"),
                                 Some(umber_gui::Theme::Light) => tr("setup.theme-light"),
                                 Some(umber_gui::Theme::HighContrast) => {
                                     tr("setup.theme-high-contrast")
@@ -2821,10 +2828,28 @@ impl UmberApp {
                                         for t in [
                                             None,
                                             Some(umber_gui::Theme::Dark),
+                                            Some(umber_gui::Theme::Dim),
                                             Some(umber_gui::Theme::Light),
                                             Some(umber_gui::Theme::HighContrast),
                                         ] {
                                             ui.selectable_value(&mut p.theme, t, name(t));
+                                        }
+                                    });
+                                let accent_name = |a: umber_gui::Accent| match a {
+                                    umber_gui::Accent::Ember => tr("setup.accent-ember"),
+                                    umber_gui::Accent::Amber => tr("setup.accent-amber"),
+                                    umber_gui::Accent::Azure => tr("setup.accent-azure"),
+                                    umber_gui::Accent::Verdant => tr("setup.accent-verdant"),
+                                    umber_gui::Accent::Violet => tr("setup.accent-violet"),
+                                    umber_gui::Accent::Crimson => tr("setup.accent-crimson"),
+                                    umber_gui::Accent::Cyan => tr("setup.accent-cyan"),
+                                };
+                                ui.label(accent_label);
+                                egui::ComboBox::from_id_salt("prefs-accent")
+                                    .selected_text(accent_name(p.accent))
+                                    .show_ui(ui, |ui| {
+                                        for a in umber_gui::Accent::ALL {
+                                            ui.selectable_value(&mut p.accent, a, accent_name(a));
                                         }
                                     });
                             });
@@ -5059,9 +5084,19 @@ impl eframe::App for UmberApp {
         // under Follow OS) re-applies whenever it changes.
         let os_dark = ui.ctx().system_theme() != Some(egui::Theme::Light);
         let want = preferences::resolve_theme(self.prefs.theme, os_dark);
-        if !self.style_installed || self.applied_theme != Some(want) {
-            umber_gui::theme::apply_theme(ui.ctx(), want, umber_gui::Density::Comfortable, 1.0);
+        if !self.style_installed
+            || self.applied_theme != Some(want)
+            || self.applied_accent != Some(self.prefs.accent)
+        {
+            umber_gui::theme::apply_matrix(
+                ui.ctx(),
+                want,
+                self.prefs.accent,
+                umber_gui::Density::Comfortable,
+                1.0,
+            );
             self.applied_theme = Some(want);
+            self.applied_accent = Some(self.prefs.accent);
             self.style_installed = true;
         }
         // Debug-only live theme reload (g0-style): UMBER_THEME_FILE polled
