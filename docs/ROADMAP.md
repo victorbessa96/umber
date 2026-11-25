@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-24)
 
-The late Assets mesh acceptance coverage is implemented at `35f12d3256c199819fca7dfce058f4c74fa6058f`, with brief `dd1510b3` and claim `b66db4b0`. Mesh no-match is isolated below the Meshes header, and directory ordering is exact bundled→exe→extra with built-in aliases. No production behavior changes. Mesh filter is 32/0, strict app clippy is clean, and independent review `deleg_aa4e5245` returned SHIP with zero findings. Final report/queue hashes and origin verification remain. The final origin check is next. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+All code-ready lanes are landed and origin-verified. The late Assets mesh acceptance coverage is implemented at `35f12d3256c199819fca7dfce058f4c74fa6058f` with independent SHIP and a 32-test filter. Origin read-back reached `07321ac3f86b307fd4d64ab7255dea9c66ae5cbb`. Only genuine human/product/platform gates remain; the complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
