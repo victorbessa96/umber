@@ -1654,13 +1654,21 @@ mod kittest {
                 .any(|k| { k.kind == THUMB_KIND_MESH && k.name == "kittest-quad" }),
             "the generic mesh glyph is cached under THUMB_KIND_MESH"
         );
-        h.state_mut().panel.search = "zzz-no-mesh".into();
+        h.state_mut().panel.search = "Worn metal".into();
         assert!(h.run_ok().is_some());
         assert!(
             h.query_by_label("kittest-quad").is_none(),
             "search filters the row"
         );
-        assert!(h.query_all_by_label(&tr("assets.no-matches")).count() >= 1);
+        let mesh_y = h.get_by_label(&tr("assets.meshes")).rect().min.y;
+        let mesh_no_matches = h
+            .query_all_by_label(&tr("assets.no-matches"))
+            .filter(|node| node.rect().min.y > mesh_y)
+            .count();
+        assert_eq!(
+            mesh_no_matches, 1,
+            "the no-match label below the Meshes header is the mesh branch's own"
+        );
         h.state_mut().panel.search.clear();
         assert!(h.run_ok().is_some());
         h.get_by_label("kittest-quad").click();
@@ -2022,11 +2030,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let canonical = dir.canonicalize().unwrap();
-        let dirs = mesh_dirs_with(&[dir.clone(), canonical.clone()]);
-        assert!(dirs.len() >= 3, "bundled + exe + one extra: {dirs:?}");
-        assert_eq!(dirs.last(), Some(&canonical), "the extra comes last");
-        let count = dirs.iter().filter(|d| **d == canonical).count();
-        assert_eq!(count, 1, "canonical duplicate suppressed");
+        let bundled = umber_core::bundled::data_paths("assets/meshes");
+        let bundled = if bundled.is_empty() {
+            vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/meshes")]
+        } else {
+            bundled
+        };
+        let exe = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("meshes");
+        let dirs = mesh_dirs_with(&[
+            exe.clone(),
+            bundled[0].clone(),
+            dir.clone(),
+            canonical.clone(),
+        ]);
+        let mut expected = bundled;
+        expected.push(exe);
+        expected.push(canonical);
+        assert_eq!(
+            dirs, expected,
+            "bundled → exe → extra, with built-in aliases suppressed"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
