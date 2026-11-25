@@ -9302,6 +9302,126 @@ mod material_pick_tests {
     }
 
     #[test]
+    fn material_pick_active_preserves_projection_mask_and_channel() {
+        let Some(mut state) = State::new() else {
+            eprintln!("skipping: no suitable wgpu adapter");
+            return;
+        };
+        state.doc.run(umber_core::LayerCommand::add(
+            "Existing fill",
+            umber_core::LayerKind::Fill,
+        ));
+        let id = state.doc.layers().last().expect("fill added").id;
+        let params = umber_mesh::FillParams {
+            source: umber_mesh::FillSource::Solid {
+                color: [0.1, 0.2, 0.3, 0.4],
+            },
+            projection: umber_mesh::FillProjection::Planar {
+                axis: umber_mesh::ProjAxis::X,
+            },
+            mask: Some(umber_mesh::polygon_fill::FillMask::triangle(0)),
+            channel: "custom".to_string(),
+        };
+        state
+            .doc
+            .run(umber_core::LayerCommand::set_fill(id, params.clone()));
+        state.gestures.selection.set_single(id);
+        let before_layers = state.doc.layers().len();
+        let outcome = apply_material_pick(
+            &mut state.doc,
+            &mut state.paint,
+            &mut state.gestures,
+            1001,
+            [0.5, 0.5],
+            false,
+        );
+        assert_eq!(
+            outcome,
+            MaterialPickOutcome::Active {
+                color: state.base_expected
+            }
+        );
+        let after = state
+            .doc
+            .layers()
+            .iter()
+            .find(|layer| layer.id == id)
+            .and_then(|layer| layer.fill.as_ref())
+            .expect("selected fill remains");
+        assert_eq!(after.projection, params.projection);
+        assert_eq!(after.mask, params.mask);
+        assert_eq!(after.channel, params.channel);
+        let umber_mesh::FillSource::Solid { color } = after.source else {
+            panic!("active pick did not produce a Solid")
+        };
+        assert_eq!(color, state.base_expected);
+        assert_eq!(state.doc.layers().len(), before_layers);
+    }
+
+    #[test]
+    fn material_pick_active_no_selection_and_non_fill_are_noops() {
+        let Some(mut state) = State::new() else {
+            eprintln!("skipping: no suitable wgpu adapter");
+            return;
+        };
+        let before_layers = state.doc.layers().len();
+        let before_history = state.doc.history.len();
+        for select_paint in [false, true] {
+            if select_paint {
+                state.gestures.selection.set_single(0);
+            }
+            let outcome = apply_material_pick(
+                &mut state.doc,
+                &mut state.paint,
+                &mut state.gestures,
+                1001,
+                [0.5, 0.5],
+                false,
+            );
+            assert_eq!(outcome, MaterialPickOutcome::Ignored);
+            assert_eq!(state.doc.layers().len(), before_layers);
+            assert_eq!(state.doc.history.len(), before_history);
+        }
+    }
+
+    #[test]
+    fn material_pick_declared_but_unmaterialized_channel_is_not_allocated() {
+        let Some(mut state) = State::new() else {
+            eprintln!("skipping: no suitable wgpu adapter");
+            return;
+        };
+        state
+            .paint
+            .resize_channel(paint_state::DEFAULT_TEXTURE_SET, "declared", 2, 2);
+        let before = state.paint.planes_present();
+        let outcome = apply_material_pick(
+            &mut state.doc,
+            &mut state.paint,
+            &mut state.gestures,
+            1001,
+            [0.5, 0.5],
+            true,
+        );
+        let MaterialPickOutcome::All { ids } = outcome else {
+            panic!("materialized channels were not picked: {outcome:?}");
+        };
+        assert_eq!(ids.len(), 2, "baseColor + layer-owned custom only");
+        assert_eq!(
+            state.paint.planes_present(),
+            before,
+            "the picker allocates no channel planes"
+        );
+        let channels: Vec<String> = state
+            .doc
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.fill.as_ref().map(|fill| fill.channel.clone()))
+            .collect();
+        assert_eq!(channels, ["baseColor", "custom"]);
+        assert!(!channels.iter().any(|channel| channel == "declared"));
+    }
+
+    #[test]
     fn material_pick_uv_gesture_creates_grouped_fills_without_lasso_or_stroke() {
         let Some(mut state) = State::new() else {
             eprintln!("skipping: no suitable wgpu adapter");
