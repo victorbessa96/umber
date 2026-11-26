@@ -96,15 +96,15 @@ pub fn generate_ground_plane(desc: &GroundPlaneDesc) -> Result<MeshData, GroundP
 **New types:**
 - `GroundPlaneMap` enum (which map(s) to bake onto the plane):
   - `Ao` — ambient occlusion (hemisphere rays from plane texels against scene).
-  - `Height` — distance from plane to first scene hit along `-Y` (world down).
+  - `Height` — distance from plane to first scene hit along `+Y` (toward the scene above).
   - `Id` — triangle ID of first hit (FNV-1a hash, same as `Id` baker).
 - `GroundPlaneParams { desc: GroundPlaneDesc, maps: Vec<GroundPlaneMap>, rays: u32, max_distance: f32, bias: f32 }` — mirrors `AoBakeParams` layout (WGSL-aligned, `bytemuck::Pod`). `rays`/`max_distance`/`bias` used by AO; `Height` uses `max_distance` as ray length; `Id` ignores them.
 - `validate_ground_plane(mesh: &MeshData, params: &GroundPlaneParams) -> Result<(), GroundPlaneBakeError>` — checks `mesh.triangles` non-empty (scene must have geometry), `desc.size > 0`, `desc.subdivisions > 0`, `maps` non-empty, `rays >= 1` for AO.
 
 **CPU reference implementation:**
 - `fn ground_plane_ao_cpu(plane: &MeshData, scene: &MeshData, params: &GroundPlaneParams, texel: (u32, u32)) -> f32` — single-texel AO via hemisphere sampling against scene triangles (reuses `ao.rs` hemisphere math).
-- `fn ground_plane_height_cpu(plane: &MeshData, scene: &MeshData, params: &GroundPlaneParams, texel: (u32, u32)) -> f32` — ray along `-Y` from plane position, returns hit distance normalized to `max_distance`.
-- `fn ground_plane_id_cpu(plane: &MeshData, scene: &MeshData, texel: (u32, u32)) -> [u8; 4]` — ray along `-Y`, returns FNV-1a hash of hit triangle index as RGBA8 (A=coverage).
+- `fn ground_plane_height_cpu(plane: &MeshData, scene: &MeshData, params: &GroundPlaneParams, texel: (u32, u32)) -> f32` — ray along `+Y` from plane position, returns hit distance normalized to `max_distance`.
+- `fn ground_plane_id_cpu(plane: &MeshData, scene: &MeshData, texel: (u32, u32)) -> [u8; 4]` — ray along `+Y`, returns FNV-1a hash of hit triangle index as RGBA8 (A=coverage).
 
 **New GPU entry point:**
 - `pub fn bake_ground_plane_mesh(device, queue, scene_mesh, params) -> Result<BakeOutputs, GroundPlaneBakeError>` — two-pass:
@@ -140,7 +140,7 @@ struct GroundPlaneParams {
 - Reads `position_tex` (binding 2, `texture_2d<f32>`), `normal_tex` (binding 3), scene triangles (binding 1, `buffer<GpuTriangle>`), uniform `GroundPlaneParams` (binding 0).
 - For each texel: reconstruct world position from `position_tex`, normal from `normal_tex` (plane normal is constant `+Y` but read from texture for parity).
 - If `maps_bitmask & 1` (AO): hemisphere loop (reuse `hemisphere_sample` + ray-triangle from `AO_BAKE_SHADER`), accumulate occlusion, write `ao = 1 - occlusion` to output layer 0 (R channel, A=coverage).
-- If `maps_bitmask & 2` (Height): ray along `-normal` (world down) against scene triangles, find closest hit `t`, write `height = t / max_distance` to output layer 1 (R channel, A=coverage).
+- If `maps_bitmask & 2` (Height): ray along `+normal` (toward the scene above) against scene triangles, find closest hit `t`, write `height = t / max_distance` to output layer 1 (R channel, A=coverage).
 - If `maps_bitmask & 4` (Id): same ray as Height, on hit compute `hash_triangle(tri)` (reuse FNV-1a from `ID_BAKE_SHADER`), write RGB=hash color, A=255 to output layer 2.
 - Unselected maps write zeros to their layer.
 - Output: `texture_storage_3d<Rgba8Unorm, write>` with depth = 3 (layers: AO, Height, Id) — or three separate `texture_storage_2d` bindings if array not supported on target. Single 3-layer texture is preferred (one dispatch, atomic per texel across maps).
@@ -201,9 +201,9 @@ Viewport sync (in `BakesPanel::show` or app shell):
 | Alternative | Reason |
 |-------------|--------|
 | Separate bake kinds per map (GroundAo, GroundHeight, GroundId) | Would need 3 bake kinds + 3 panel rows + 3 persistence fields; one baker with map bitmask avoids N× surface area. The maps share the same plane geometry and scene occluder — one dispatch, three layers. |
-| Ground plane as a post-process on baked AO | Would need AO baked first, then a second pass to composite; the shader computes all three maps in one raycast loop (AO hemisphere + single down-ray for height/id). Zero extra dispatches. |
+| Ground plane as a post-process on baked AO | Would need AO baked first, then a second pass to composite; the shader computes all three maps in one raycast loop (AO hemisphere + single up-ray for height/id). Zero extra dispatches. |
 | Plane UVs from world-space triplanar | Planar UVs (0..1 across plane extents) are the standard for ground plane bakes (Marmoset, xNormal). Triplanar would distort the bake at plane edges and complicate the UV layout for no artist benefit. |
-| Height map as world-space position Y | Height = distance to scene along -Y is the actionable value for displacement/parallax. World Y is recoverable (plane_y + height) but not the primary use case. |
+| Height map as world-space position Y | Height = distance to scene along +Y is the actionable value for displacement/parallax. World Y is recoverable (plane_y + height) but not the primary use case. |
 | Per-tile ground plane bakes (like AO) | Ground plane is a single planar surface covering the scene bounds — no UDIM benefit. Single-tile raster (like curvature/position) is correct for v1. |
 | Ground plane only for high-poly transfer | Ground plane bakes against the **scene mesh** (low or high), not a high-poly source. It is a self-bake category, not a transfer. The high-poly group is for transfer maps only. |
 

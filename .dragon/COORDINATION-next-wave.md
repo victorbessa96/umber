@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** all code-ready lanes are landed and origin-verified. The late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f` with independent SHIP and a 4-test filter. Origin read-back reached `5457c725da2d8c740aa9386fc08b195536557167`. Only genuine human/product/platform gates remain; no second kill, release, centralhost, or public-PR scope.
+**Updated 2026-11-25:** the earlier code-ready marker was falsified by scheduled CI run `45221968683`: 13 live `umber-bake --features gpu` failures reproduced at current master. Brief `444904f870f21b85e93590b8c2a50f57fcefe220` is committed. The repair is implemented under `razul-ci-gpu-parity`: ground-plane +Y winding/rays and corrected CPU oracle; IdMulti ordinary mask bindings, 32/272-byte ABI, and Replace-first-covered state. Fresh verification: full bake GPU 206/0, umber-gpu 156/0, mesh lib 167/0 plus integrations, standard/GPU/workspace clippy and static gates green. Independent final review `deleg_cf9f2d78` is pending; implementation is not yet committed or pushed. After landing, a fresh audit pass is owed before any renewed code-ready claim.
 
 
 ## Historical coordination snapshots (append-only; not current status)

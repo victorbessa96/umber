@@ -52,3 +52,10 @@ No new dependency, file format, project schema, network behavior, or device-feat
 ## Non-goals
 
 No ground-plane feature redesign, product-default decision, GPU capability expansion, release tag, centralhost contact, public PR, or broad refactor. No hiding the failures behind adapter skips or loosening parity tolerances.
+
+## Implementation addendum
+
+- Target item 4 is superseded by the stronger default-device design: eight ordinary texture bindings (5..=12) replace the binding array entirely. This avoids both the non-uniform-indexing capability and the default `max_binding_array_elements_per_shader_stage = 0` limit discovered after the first literal-load draft. The test uses a default device to prove it.
+- The same pipeline exposed an independent ABI defect: WGSL records require a 32-byte `IdSourceUniform` stride and 272-byte `IdMultiUniform`, not Rust's old 28/240-byte layout. Explicit padding, alignment, and compile-time size assertions now pin the contract.
+- A new black-first Replace regression found and closed an existing semantic bug: first-covered wins even when the first source's RGB is zero. An additional acceptance loop covers every mask binding 0..7.
+- The original D5 brief's downward Height/ID direction was wrong for a plane below the scene and is corrected to +Y in the same kill. The CPU AO oracle also had to mirror the shader's Duff basis, whose second axis is -Z for +Y.
