@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-26:** Windows CI hardening is landed and two-platform CI verified at `c14d1baf61a263a396cbe09b699152dfcd7e5df8`. `safe-push.py` accepted all three commits; origin/master read-back matches. CI `45829837272` succeeded on Ubuntu `139943504609` including GPU and E2E and Windows `139943504498` including tests, WinInk, and release smoke. The bounded continuation independently verified and stood down when the original owner resumed; DeepSeek review returned SHIP with no findings, full app 1,284/0 across 11 suites. Worktree and lock registry are clear. This closes the Windows kill only; the full-project audit delta remains open before any code-ready completion claim.
+**Updated 2026-11-26:** Windows CI hardening is closed at `c14d1baf` with two-platform CI success `45829837272`; final docs close-out `ec979743` is origin-verified. Full-project audit brief `32f582dd81989f36ad24a8ea3ac9d2ae3750c284` is now active under `razul-full-audit-2026-11-26`. Mechanical census: 16 crates, 3,295 test attributes, 372,122 Rust LOC, 399,235 total code LOC. All six 2026-10-24 headline debts are directly confirmed closed. Five independent read-only lens agents (engine, formats, tools, UI/UX/requirements, platform) are in flight; report surfaces are locked. Consume findings before any renewed code-ready claim.
 
 
 ## Historical coordination snapshots (append-only; not current status)
