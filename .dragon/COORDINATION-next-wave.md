@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** scheduled-CI GPU parity repair `543e038ea9706ee7edd67b27408e7bc51d2b9954` is landed locally with independent `deleg_cf9f2d78` SHIP, brief `444904f870f21b85e93590b8c2a50f57fcefe220` and claim `b1248d6098829ae701e854137d376ce0942a62b4`. It fixes the 13 live failures from run `45221968683`: ground-plane +Y winding/rays and exact target-UV/Duff oracle, plus IdMulti ordinary mask bindings, 32/272-byte ABI, padded views, and Replace-first-covered state. Committed-HEAD full bake GPU 206/0; umber-gpu 156/0, mesh lib 167/0 plus integrations; standard/GPU/workspace clippy and static gates GREEN. Safe-push and current-tip CI remain open. A fresh full-audit delta follows before any renewed code-ready claim.
+**Updated 2026-11-26 (Razul, original owner `local-5f7af034213b18fa0169eceb116b8a6e0a9a51fb376e19d41cdbb800483e84c4` active again):** the bounded continuation adopted the reboot-orphaned kill, verified the same two-file diff, and stood down when this owner resumed. Its independent DeepSeek review at `~/.hermes/cache/scratch/umber-windows-ci-hardening-review.log` returned **SHIP / NO FINDINGS**; its full app log at `~/.hermes/cache/scratch/umber-windows-ci-hardening-app-tests.log` is **1,284 passed, 0 failed across 11 suites**. This owner also reproduced both exact regressions 1/0 each and ran workspace clippy clean. `razul-windows-ci-hardening` is re-locked by the original owner for close-out; no duplicate commit or second reviewer is pending. Final two-platform CI remains the only kill gate.
 
 
 ## Historical coordination snapshots (append-only; not current status)

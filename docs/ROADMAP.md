@@ -20,9 +20,9 @@ partner."
 
 ---
 
-## Current hardening wave (2026-11-25)
+## Current hardening wave (2026-11-26)
 
-Scheduled-CI GPU parity repair `543e038e` is landed locally with independent SHIP. It fixes the 13 live failures from run `45221968683`: ground-plane +Y winding/rays and exact target-UV/Duff oracle, plus IdMulti ordinary mask bindings, 32/272-byte ABI, padded views, and Replace-first-covered state. Committed-HEAD full bake GPU 206/0; umber-gpu 156/0, mesh lib 167/0 plus integrations; standard/GPU/workspace clippy and static gates GREEN. Safe-push and current-tip CI remain open. A fresh full-audit delta follows before any renewed code-ready claim. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+GPU parity repair `42ddbedc` is landed and origin-verified; current-tip CI `45760656534` proved Ubuntu fully green and exposed two Windows acceptance failures. Windows follow-up `65ffc37d` now canonicalizes extra mesh directories with original-path fallback and gives only the occluder kittest the established 600-second WARP allowance. Both exact tests 1/0 each, full app 1,284/0 across 11 suites, workspace clippy/static gates GREEN, and independent DeepSeek review SHIP with no findings. Safe-push and fresh two-platform CI remain open; a full-project audit delta follows that verdict. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 
