@@ -461,11 +461,13 @@ pub fn bake_transfer_mesh(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
-    // Low mesh triangle vertex indices buffer (vec3<u32> per triangle)
-    let low_tri_verts: Vec<[u32; 3]> = low
+    // WGSL storage arrays of vec3<u32> use a 16-byte stride (12-byte
+    // payload rounded up to 16-byte vector alignment), so pad every
+    // record explicitly; packing raw [u32; 3] shifts every later triangle.
+    let low_tri_verts: Vec<[u32; 4]> = low
         .indices
         .chunks_exact(3)
-        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .map(|chunk| [chunk[0], chunk[1], chunk[2], 0])
         .collect();
     let low_tri_verts_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("umber_bake_transfer_low_tri_verts"),
@@ -1252,6 +1254,53 @@ mod tests {
                         "ramp texel ({col}, {y}): h = {h} -> {byte}"
                     );
                 }
+            }
+        }
+
+        /// Nonuniform cage offsets on BOTH triangles: the upload must preserve
+        /// the 16-byte WGSL `vec3<u32>` record stride, including triangle 1.
+        #[test]
+        fn cage_nonuniform_second_triangle_uses_packed_vertex_indices() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mut low = low_quad();
+            // A degenerate third record is invisible to UV coverage but
+            // makes a 16-byte misread of triangle 1 `[2,3,1]`, never the
+            // cyclic alias `[0,2,3]` that a two-record fixture permits.
+            low.indices.extend([1, 1, 1]);
+            let cage = umber_mesh::Cage {
+                offsets: vec![
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.25],
+                    [0.0, 0.0, 0.5],
+                    [0.0, 0.0, 0.75],
+                ],
+            };
+            let map = bake_transfer_mesh(
+                &device,
+                &queue,
+                &low,
+                &high_flat_at_minus_half(),
+                &TransferParams::new(1.0, 2.0, 0.5, 32, 32),
+                Some(&cage),
+            )
+            .expect("nonuniform cage bake should succeed");
+            let gbuffer = umber_mesh::UvGBuffer::build(&low, umber_mesh::FIRST_TILE, 32, 32);
+            for (x, y) in [(24, 24), (8, 8)] {
+                let hit = gbuffer.at(x, y).expect("full quad coverage");
+                let tri = &low.indices[hit.triangle * 3..hit.triangle * 3 + 3];
+                let cage_z = cage
+                    .lerp_at(tri, (hit.bary[1], hit.bary[2]))
+                    .expect("cage lerp")[2];
+                let h = (0.5 + cage_z + 1.0) / 3.0;
+                let byte = (h * 255.0).round() as u8;
+                assert_eq!(
+                    texel(&map, 32, x, y),
+                    [byte, byte, byte, 255],
+                    "triangle {} texel ({x},{y}) must use its own indices and cage offsets",
+                    hit.triangle
+                );
             }
         }
 
