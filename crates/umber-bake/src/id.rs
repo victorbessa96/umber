@@ -106,6 +106,14 @@ pub enum IdBakeError {
         /// The ceiling it exceeded ([`MAX_TRIS_PER_BAKE`]).
         max: u32,
     },
+    /// [`IdMultiParams::sources`] exceeded [`MAX_ID_MULTI_SOURCES`].
+    #[error("ID multi-source bake has {count} sources, over the {max}-source budget")]
+    TooManySources {
+        /// The actual configured source count.
+        count: usize,
+        /// The fixed GPU/source-evaluation budget.
+        max: usize,
+    },
     /// The requested bake-target width or height was zero.
     #[error("bake target dimensions must be non-zero (got {width}x{height})")]
     EmptyTarget {
@@ -347,6 +355,9 @@ impl Default for IdSourceParams {
     }
 }
 
+/// Fixed source budget shared by validation, CPU evaluation, and GPU upload.
+pub const MAX_ID_MULTI_SOURCES: usize = 8;
+
 /// Full multi-source ID bake parameters.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct IdMultiParams {
@@ -546,6 +557,12 @@ pub fn validate_multi(mesh: &MeshData, params: &IdMultiParams) -> Result<(), IdB
     if params.sources.is_empty() {
         return Err(IdBakeError::EmptyMesh); // repurposed: no sources configured
     }
+    if params.sources.len() > MAX_ID_MULTI_SOURCES {
+        return Err(IdBakeError::TooManySources {
+            count: params.sources.len(),
+            max: MAX_ID_MULTI_SOURCES,
+        });
+    }
     let weight_sum: f32 = params.sources.iter().map(|s| s.weight).sum();
     if weight_sum <= 0.0 {
         return Err(IdBakeError::EmptyTarget {
@@ -728,7 +745,7 @@ pub fn bake_id_multi_mesh(
     }; 8];
 
     for (i, src) in params.sources.iter().enumerate() {
-        if i >= 8 {
+        if i >= MAX_ID_MULTI_SOURCES {
             break;
         }
         uniform_sources[i] = IdSourceUniform {
@@ -754,7 +771,7 @@ pub fn bake_id_multi_mesh(
     }
 
     let uniform = IdMultiUniform {
-        source_count: params.sources.len().min(8) as u32,
+        source_count: params.sources.len().min(MAX_ID_MULTI_SOURCES) as u32,
         blend_mode: params.blend_mode as u32,
         width,
         height,
@@ -935,6 +952,32 @@ mod tests {
     }
 
     // --- Multi-source CPU unit tests (no GPU feature) ---
+
+    #[test]
+    fn id_multi_rejects_more_than_eight_sources() {
+        let params = |count| IdMultiParams {
+            sources: (0..count)
+                .map(|_| IdSourceParams {
+                    source: IdSource::Manual,
+                    weight: 1.0,
+                    mask_path: None,
+                    color: [255, 255, 255],
+                })
+                .collect(),
+            blend_mode: IdBlendMode::Additive,
+            width: 32,
+            height: 32,
+        };
+        assert!(validate_multi(&two_tri_mesh(), &params(8)).is_ok());
+        let err = validate_multi(&two_tri_mesh(), &params(9)).unwrap_err();
+        assert!(matches!(
+            err,
+            IdBakeError::TooManySources {
+                count: 9,
+                max: MAX_ID_MULTI_SOURCES
+            }
+        ));
+    }
 
     #[test]
     fn id_multi_additive_blend_matches_cpu() {
@@ -1341,6 +1384,126 @@ mod tests {
                     "the covered black first source must win even though its RGB is zero"
                 );
             }
+        }
+
+        #[test]
+        fn id_multi_replace_zero_weight_predecessor_does_not_latch() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mesh = split_halves_mesh();
+            let params = IdMultiParams {
+                sources: vec![
+                    IdSourceParams {
+                        source: IdSource::Manual,
+                        weight: 0.0,
+                        mask_path: None,
+                        color: [255, 255, 255],
+                    },
+                    IdSourceParams {
+                        source: IdSource::Manual,
+                        weight: 1.0,
+                        mask_path: None,
+                        color: [0, 255, 0],
+                    },
+                ],
+                blend_mode: IdBlendMode::Replace,
+                width: SIZE,
+                height: SIZE,
+            };
+            let bytes =
+                bake_id_multi_mesh(&device, &queue, &mesh, &params, None, &[]).expect("bake");
+            assert_eq!(texel(&bytes, SIZE, 3, 8), [0, 255, 0, 255]);
+        }
+
+        #[test]
+        fn id_multi_replace_masked_predecessor_and_all_rejected_stay_honest() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mesh = split_halves_mesh();
+            let mask_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("mask_tex_fully_rejecting"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let zeros = vec![0.0f32; (SIZE * SIZE * 4) as usize];
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &mask_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&zeros),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(SIZE * 16),
+                    rows_per_image: Some(SIZE),
+                },
+                wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let red_masked = IdSourceParams {
+                source: IdSource::Manual,
+                weight: 1.0,
+                mask_path: None,
+                color: [255, 0, 0],
+            };
+            let black = IdSourceParams {
+                source: IdSource::Manual,
+                weight: 1.0,
+                mask_path: None,
+                color: [0, 0, 0],
+            };
+            let green = IdSourceParams {
+                source: IdSource::Manual,
+                weight: 1.0,
+                mask_path: None,
+                color: [0, 255, 0],
+            };
+            let params = IdMultiParams {
+                sources: vec![red_masked.clone(), black, green],
+                blend_mode: IdBlendMode::Replace,
+                width: SIZE,
+                height: SIZE,
+            };
+            let bytes =
+                bake_id_multi_mesh(&device, &queue, &mesh, &params, None, &[Some(&mask_view)])
+                    .expect("masked predecessor then black winner");
+            assert_eq!(
+                texel(&bytes, SIZE, 3, 8),
+                [0, 0, 0, 255],
+                "masked red falls through, black latches, green cannot overwrite"
+            );
+
+            let rejected = IdMultiParams {
+                sources: vec![red_masked],
+                blend_mode: IdBlendMode::Replace,
+                width: SIZE,
+                height: SIZE,
+            };
+            let bytes =
+                bake_id_multi_mesh(&device, &queue, &mesh, &rejected, None, &[Some(&mask_view)])
+                    .expect("all sources rejected");
+            assert_eq!(
+                texel(&bytes, SIZE, 3, 8),
+                [0, 0, 0, 0],
+                "a fully masked source must not produce opaque black"
+            );
         }
 
         #[test]
