@@ -4634,7 +4634,9 @@ mod tests {
     }
 
     fn wait_for_bake(h: &mut egui_kittest::Harness<'_, BakesPanel>) {
-        for _ in 0..600 {
+        // WARP needs the same 600 s allowance as this file's other bake
+        // tests. The old 6 s budget expired before the worker landed.
+        for _ in 0..60_000 {
             let running = h.state_mut().poll_job();
             h.run();
             if !running {

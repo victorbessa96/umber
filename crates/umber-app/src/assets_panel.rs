@@ -306,7 +306,10 @@ fn mesh_dirs_with(extras: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
                     && dir.canonicalize().ok() == extra.canonicalize().ok())
         });
         if !duplicate {
-            dirs.push(extra.clone());
+            // Preserve the same canonical identity used by duplicate
+            // comparison. On Windows this prevents DOS short-form and
+            // extended-length spellings of one directory from diverging.
+            dirs.push(extra.canonicalize().unwrap_or_else(|_| extra.clone()));
         }
     }
     dirs
