@@ -360,8 +360,9 @@ pub struct IdMultiParams {
     pub height: u32,
 }
 
-/// Uniform struct matching WGSL `IdSourceUniform` (16-byte aligned).
-#[repr(C)]
+/// Uniform struct matching WGSL `IdSourceUniform`: 32 bytes with the color
+/// vector at offset 16 and a 16-byte array stride.
+#[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct IdSourceUniform {
     /// IdSource enum discriminant.
@@ -370,11 +371,13 @@ pub struct IdSourceUniform {
     pub weight: f32,
     /// 0/1 whether mask texture is bound for this source.
     pub has_mask: u32,
+    /// Explicit padding to the WGSL `vec4` alignment boundary.
+    pub _pad0: u32,
     /// Manual color (r,g,b,0) for Manual source, else 0.
     pub color: [u32; 4],
 }
 
-/// Uniform struct matching WGSL `IdMultiUniform` (16-byte aligned).
+/// Uniform struct matching WGSL `IdMultiUniform`: 272 bytes, 16-byte aligned.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct IdMultiUniform {
@@ -389,6 +392,15 @@ pub struct IdMultiUniform {
     /// Source array (max 8, fixed for bind group layout).
     pub sources: [IdSourceUniform; 8],
 }
+
+const _: () = assert!(
+    std::mem::size_of::<IdSourceUniform>() == 32,
+    "IdSourceUniform must match the 32-byte WGSL record"
+);
+const _: () = assert!(
+    std::mem::size_of::<IdMultiUniform>() == 272,
+    "IdMultiUniform must match the 272-byte WGSL uniform"
+);
 
 /// CPU reference: FNV-1a hash of a triangle index (mirrors WGSL `hash_triangle`).
 fn fnv1a_triangle_cpu(tri: u32) -> [u8; 3] {
@@ -618,74 +630,77 @@ pub fn bake_id_multi_mesh(
     // 2: out_tex (Rgba8Unorm storage)
     // 3: uniform (IdMultiUniform)
     // 4: id_map_tex (f32, optional)
-    // 5: mask_tex array (f32, up to 8, shared binding indexed by source)
+    // 5..=12: optional mask textures (ordinary bindings indexed by source)
+    let mut layout_entries = vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: Some(
+                    std::num::NonZeroU64::new(std::mem::size_of::<IdMultiUniform>() as u64)
+                        .unwrap(),
+                ),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+    ];
+    for binding in 5..=12 {
+        layout_entries.push(wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+    }
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("umber_bake_id_multi_bind_group_layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Uint,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: Some(
-                        std::num::NonZeroU64::new(std::mem::size_of::<IdMultiUniform>() as u64)
-                            .unwrap(),
-                    ),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: Some(std::num::NonZeroU32::new(8).unwrap()),
-            },
-        ],
+        entries: &layout_entries,
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -708,6 +723,7 @@ pub fn bake_id_multi_mesh(
         source: 0,
         weight: 0.0,
         has_mask: 0,
+        _pad0: 0,
         color: [0, 0, 0, 0],
     }; 8];
 
@@ -723,6 +739,7 @@ pub fn bake_id_multi_mesh(
             } else {
                 0
             },
+            _pad0: 0,
             color: if src.source == IdSource::Manual {
                 [
                     src.color[0] as u32,
@@ -768,40 +785,42 @@ pub fn bake_id_multi_mesh(
     let dummy_view = dummy_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
     let id_map_view = id_map_view.unwrap_or(&dummy_view);
-    let mask_views: Vec<_> = mask_views
-        .iter()
-        .map(|v| v.unwrap_or(&dummy_view))
+    let mask_views: Vec<_> = (0..8)
+        .map(|i| mask_views.get(i).and_then(|v| *v).unwrap_or(&dummy_view))
         .collect();
 
+    let mut bind_entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&prim_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(&bary_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::TextureView(target.view()),
+        },
+        wgpu::BindGroupEntry {
+            binding: 3,
+            resource: wgpu::BindingResource::Buffer(uniform_buffer.as_entire_buffer_binding()),
+        },
+        wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::TextureView(id_map_view),
+        },
+    ];
+    for (binding, view) in (5..=12).zip(&mask_views) {
+        bind_entries.push(wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+    }
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("umber_bake_id_multi_bind_group"),
         layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&prim_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&bary_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(target.view()),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Buffer(uniform_buffer.as_entire_buffer_binding()),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(id_map_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::TextureViewArray(&mask_views),
-            },
-        ],
+        entries: &bind_entries,
     });
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1137,20 +1156,7 @@ mod tests {
                 eprintln!("skipping: UMBER_RUN_GPU_TESTS not set (2026-11-18 capability gate)");
                 return None;
             }
-            if !adapter
-                .features()
-                .contains(wgpu::Features::TEXTURE_BINDING_ARRAY)
-            {
-                eprintln!(
-                    "skipping: adapter lacks TEXTURE_BINDING_ARRAY (2026-11-18 capability gate)"
-                );
-                return None;
-            }
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::TEXTURE_BINDING_ARRAY,
-                ..Default::default()
-            }))
-            .ok()
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
         }
 
         fn split_halves_mesh() -> MeshData {
@@ -1298,6 +1304,42 @@ mod tests {
                 assert_eq!(px[1], tri0_hash[1], "Replace first wins G at (3,{y})");
                 assert_eq!(px[2], tri0_hash[2], "Replace first wins B at (3,{y})");
                 assert_eq!(px[3], 255);
+            }
+        }
+
+        #[test]
+        fn id_multi_replace_black_first_still_wins() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mesh = split_halves_mesh();
+            let params = IdMultiParams {
+                sources: vec![
+                    IdSourceParams {
+                        source: IdSource::Manual,
+                        weight: 1.0,
+                        mask_path: None,
+                        color: [0, 0, 0],
+                    },
+                    IdSourceParams {
+                        source: IdSource::Manual,
+                        weight: 1.0,
+                        mask_path: None,
+                        color: [255, 0, 0],
+                    },
+                ],
+                blend_mode: IdBlendMode::Replace,
+                width: SIZE,
+                height: SIZE,
+            };
+            let bytes =
+                bake_id_multi_mesh(&device, &queue, &mesh, &params, None, &[]).expect("bake");
+            for y in [8, 16, 24] {
+                assert_eq!(
+                    texel(&bytes, SIZE, 3, y),
+                    [0, 0, 0, 255],
+                    "the covered black first source must win even though its RGB is zero"
+                );
             }
         }
 
@@ -1531,6 +1573,88 @@ mod tests {
                 assert_eq!(px_left, [255, 255, 0, 255], "left half masked at (3,{y})");
                 // Right: only source 1 (green)
                 assert_eq!(px_right, [0, 255, 0, 255], "right half masked at (28,{y})");
+            }
+        }
+
+        #[test]
+        fn id_multi_each_mask_binding_selects_its_source() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mesh = split_halves_mesh();
+            let mask_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("mask_tex_all_bindings"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let mut mask_data = vec![0.0f32; (SIZE * SIZE * 4) as usize];
+            for y in 0..SIZE {
+                for x in 0..SIZE / 2 {
+                    mask_data[((y * SIZE + x) * 4 + 3) as usize] = 1.0;
+                }
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &mask_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&mask_data),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(SIZE * 16),
+                    rows_per_image: Some(SIZE),
+                },
+                wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+            for active in 0..8 {
+                let mut sources = vec![
+                    IdSourceParams {
+                        source: IdSource::Manual,
+                        weight: 0.0,
+                        mask_path: None,
+                        color: [0, 0, 0],
+                    };
+                    8
+                ];
+                sources[active].weight = 1.0;
+                sources[active].color = [255, 0, 0];
+                let params = IdMultiParams {
+                    sources,
+                    blend_mode: IdBlendMode::Additive,
+                    width: SIZE,
+                    height: SIZE,
+                };
+                let mut masks = vec![None; active];
+                masks.push(Some(&mask_view));
+                let bytes = bake_id_multi_mesh(&device, &queue, &mesh, &params, None, &masks)
+                    .expect("bake each mask binding");
+                assert_eq!(
+                    texel(&bytes, SIZE, 3, 8),
+                    [255, 0, 0, 255],
+                    "mask binding {active} must cover the left half"
+                );
+                assert_eq!(
+                    texel(&bytes, SIZE, 28, 8),
+                    [0, 0, 0, 0],
+                    "mask binding {active} must reject the right half"
+                );
             }
         }
 

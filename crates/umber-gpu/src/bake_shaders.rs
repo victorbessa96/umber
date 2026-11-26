@@ -2194,9 +2194,9 @@ fn cs_main_from_position(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 /// - `prim_tex` (binding 0): the G-buffer's `R32Uint` prim texture (triangle index, `0xFFFFFFFF` = uncovered).
 /// - `bary_tex` (binding 1): the G-buffer's `Rgba32Float` barycentric texture (b0,b1,b2,coverage).
 /// - `out_tex` (binding 2): write-only `Rgba8Unorm` storage.
-/// - `params` (binding 3): uniform `IdMultiUniform` (80 bytes, 16-byte aligned).
+/// - `params` (binding 3): uniform `IdMultiUniform` (272 bytes, 16-byte aligned).
 /// - `id_map_tex` (binding 4): optional existing ID map, `texture_2d<f32>`.
-/// - `mask_tex` (binding 5): array of up to 8 optional mask textures, `texture_2d<f32>`.
+/// - `mask_tex0..7` (bindings 5..=12): up to 8 optional mask textures as ordinary bindings.
 ///
 /// - `@workgroup_size(8, 8)`, dispatched `ceil(w/8) x ceil(h/8)`.
 /// - Reuses `fnv1a_step` / `hash_triangle` from `ID_BAKE_SHADER` logic.
@@ -2205,8 +2205,6 @@ fn cs_main_from_position(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 ///   dispatched and wrote zeros if called; the UV G-buffer is the only route.
 pub fn id_multi_bake_shader() -> &'static str {
     r#"
-enable wgpu_binding_array;
-
 struct IdSourceUniform {
   source: u32,      // IdSource enum discriminant
   weight: f32,
@@ -2243,7 +2241,28 @@ fn hash_triangle(tri: u32) -> u32 {
 @group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<uniform> params: IdMultiUniform;
 @group(0) @binding(4) var id_map_tex: texture_2d<f32>;
-@group(0) @binding(5) var mask_tex: binding_array<texture_2d<f32>, 8>;
+@group(0) @binding(5) var mask_tex0: texture_2d<f32>;
+@group(0) @binding(6) var mask_tex1: texture_2d<f32>;
+@group(0) @binding(7) var mask_tex2: texture_2d<f32>;
+@group(0) @binding(8) var mask_tex3: texture_2d<f32>;
+@group(0) @binding(9) var mask_tex4: texture_2d<f32>;
+@group(0) @binding(10) var mask_tex5: texture_2d<f32>;
+@group(0) @binding(11) var mask_tex6: texture_2d<f32>;
+@group(0) @binding(12) var mask_tex7: texture_2d<f32>;
+
+// Ordinary texture bindings avoid both binding-array capabilities and the
+// array-element device limit. Each branch names its texture literally.
+fn mask_covers(index: u32, coord: vec2<i32>) -> bool {
+  if (index == 0u) { return textureLoad(mask_tex0, coord, 0).w > 0.5; }
+  if (index == 1u) { return textureLoad(mask_tex1, coord, 0).w > 0.5; }
+  if (index == 2u) { return textureLoad(mask_tex2, coord, 0).w > 0.5; }
+  if (index == 3u) { return textureLoad(mask_tex3, coord, 0).w > 0.5; }
+  if (index == 4u) { return textureLoad(mask_tex4, coord, 0).w > 0.5; }
+  if (index == 5u) { return textureLoad(mask_tex5, coord, 0).w > 0.5; }
+  if (index == 6u) { return textureLoad(mask_tex6, coord, 0).w > 0.5; }
+  if (index == 7u) { return textureLoad(mask_tex7, coord, 0).w > 0.5; }
+  return false;
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -2263,6 +2282,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var acc_g: f32 = 0.0;
   var acc_b: f32 = 0.0;
   var has_any_coverage: bool = false;
+  var replace_first_set: bool = false;
 
   for (var i: u32 = 0u; i < params.source_count; i = i + 1u) {
     let src = params.sources[i];
@@ -2307,12 +2327,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       src_cov = true;
     }
 
-    // Mask gating
-    if (src_cov && src.has_mask == 1u) {
-      let mask_sample = textureLoad(mask_tex[i], coord, 0);
-      if (mask_sample.w <= 0.5) {
-        src_cov = false;
-      }
+    // Mask gating through literal-indexed ordinary texture loads.
+    if (src_cov && src.has_mask == 1u && !mask_covers(i, coord)) {
+      src_cov = false;
     }
 
     if (!src_cov) {
@@ -2338,11 +2355,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       acc_g = max(acc_g, wg);
       acc_b = max(acc_b, wb);
     } else if (params.blend_mode == 2u) {
-      // Replace: first source with coverage wins
-      if (!has_any_coverage || acc_r == 0.0 && acc_g == 0.0 && acc_b == 0.0) {
+      // Replace: first source with coverage wins, including a black source.
+      if (!replace_first_set) {
         acc_r = wr;
         acc_g = wg;
         acc_b = wb;
+        replace_first_set = true;
       }
     }
   }
@@ -2563,11 +2581,11 @@ pub const GROUND_PLANE_BAKE_SHADER: &str = r#"
           textureStore(out_tex, vec3<i32>(coord.x, coord.y, 0), vec4<f32>(0.0, 0.0, 0.0, 0.0));
       }
 
-      // Height (bit 1) - ray along -Y (world down)
+      // Height (bit 1) - ray along +Y (toward the scene above the plane)
       if ((params.maps_bitmask & 2u) != 0u) {
           var best_t = params.max_distance;
           var hit_found = false;
-          let height_dir = -vec3<f32>(0.0, 1.0, 0.0);
+          let height_dir = vec3<f32>(0.0, 1.0, 0.0);
           for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
               let tri = triangles[t];
               let hit = ray_hit_distance(ray_origin, height_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance);
@@ -2591,7 +2609,7 @@ pub const GROUND_PLANE_BAKE_SHADER: &str = r#"
           var best_t = params.max_distance;
           var best_tri: u32 = 0xFFFFFFFFu;
           var hit_found = false;
-          let id_dir = -vec3<f32>(0.0, 1.0, 0.0);
+          let id_dir = vec3<f32>(0.0, 1.0, 0.0);
           for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
               let tri = triangles[t];
               let hit = ray_hit_distance(ray_origin, id_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance);
@@ -2817,11 +2835,11 @@ pub const GROUND_PLANE_BAKE_SHADER_2D_FALLBACK: &str = r#"
           textureStore(out_ao, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
       }
 
-      // Height (bit 1) - ray along -Y (world down)
+      // Height (bit 1) - ray along +Y (toward the scene above the plane)
       if ((params.maps_bitmask & 2u) != 0u) {
           var best_t = params.max_distance;
           var hit_found = false;
-          let height_dir = -vec3<f32>(0.0, 1.0, 0.0);
+          let height_dir = vec3<f32>(0.0, 1.0, 0.0);
           for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
               let tri = triangles[t];
               let hit = ray_hit_distance(ray_origin, height_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance);
@@ -2845,7 +2863,7 @@ pub const GROUND_PLANE_BAKE_SHADER_2D_FALLBACK: &str = r#"
           var best_t = params.max_distance;
           var best_tri: u32 = 0xFFFFFFFFu;
           var hit_found = false;
-          let id_dir = -vec3<f32>(0.0, 1.0, 0.0);
+          let id_dir = vec3<f32>(0.0, 1.0, 0.0);
           for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
               let tri = triangles[t];
               let hit = ray_hit_distance(ray_origin, id_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance);

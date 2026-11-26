@@ -166,13 +166,15 @@ pub fn generate_ground_plane(desc: &GroundPlaneDesc) -> Result<MeshData, GroundP
             let i1 = gz * stride + gx + 1;
             let i2 = (gz + 1) * stride + gx;
             let i3 = (gz + 1) * stride + gx + 1;
-            // Two triangles per quad (CCW winding)
+            // Two triangles per quad, wound so their face normals point +Y.
+            // X advances before Z, so (i0,i1,i2) would face downward even
+            // though every vertex normal above is +Y.
             indices.push(i0);
-            indices.push(i1);
             indices.push(i2);
             indices.push(i1);
+            indices.push(i1);
+            indices.push(i2);
             indices.push(i3);
-            indices.push(i2);
         }
     }
 
@@ -1029,6 +1031,29 @@ mod tests {
         assert!((xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 2.0).abs() < 1e-6);
         assert!((zs.iter().copied().fold(f32::INFINITY, f32::min) + 2.0).abs() < 1e-6);
         assert!((zs.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 2.0).abs() < 1e-6);
+    }
+
+    /// The rasterizer recomputes face normals from winding, so the emitted
+    /// triangles must agree with the +Y vertex-normal contract. A downward
+    /// face makes every ground-plane scene ray point away from the scene.
+    #[test]
+    fn ground_plane_face_winding_points_up() {
+        let mesh = generate_ground_plane(&GroundPlaneDesc {
+            size: 4.0,
+            height_offset: 0.5,
+            subdivisions: 2,
+        })
+        .expect("ground plane generation");
+        for tri in mesh.indices.chunks_exact(3) {
+            let v0 = glam::Vec3::from(mesh.positions[tri[0] as usize]);
+            let v1 = glam::Vec3::from(mesh.positions[tri[1] as usize]);
+            let v2 = glam::Vec3::from(mesh.positions[tri[2] as usize]);
+            let normal = (v1 - v0).cross(v2 - v0).normalize();
+            assert!(
+                normal.y > 0.999,
+                "triangle {tri:?} faces {normal:?}, expected +Y"
+            );
+        }
     }
 
     /// `subdivisions=0` returns `Err`.

@@ -184,31 +184,44 @@ fn uniform_for(params: &GroundPlaneParams, tri_count: u32) -> GpUniform {
     }
 }
 
+/// Rust mirror of the WGSL Duff-et-al. orthonormal basis. Keeping the exact
+/// frame matters: for +Y the second axis is -Z, not +Z.
+fn ground_plane_orthonormal_basis(n: Vec3) -> (Vec3, Vec3) {
+    let sign_z = if n.z >= 0.0 { 1.0 } else { -1.0 };
+    let a = -1.0 / (sign_z + n.z);
+    let b = n.x * n.y * a;
+    (
+        Vec3::new(1.0 + sign_z * n.x * n.x * a, sign_z * b, -sign_z * n.x),
+        Vec3::new(b, sign_z + n.y * n.y * a, -n.y),
+    )
+}
+
 /// CPU reference: single-texel AO via hemisphere sampling against scene triangles.
 #[allow(dead_code)]
 fn ground_plane_ao_cpu(
-    plane: &MeshData,
     scene: &MeshData,
     desc: &GroundPlaneDesc,
     params: &GroundPlaneParams,
     texel: (u32, u32),
+    target: (u32, u32),
 ) -> f32 {
-    // Infer texture resolution from plane mesh (ground plane is square with uniform subdivisions)
-    let tex_res = (plane.positions.len() as f32).sqrt() - 1.0;
-    if tex_res < 1.0 {
+    let (width, height) = target;
+    if width == 0 || height == 0 {
         return 1.0;
     }
 
-    // Reconstruct world position from UV
+    // Mirror the UV G-buffer: texel centers and the raster target's Y flip,
+    // at the actual bake-target resolution (not the plane subdivisions).
     let (u, v) = texel;
-    let uv_u = (u as f32 + 0.5) / tex_res;
-    let uv_v = (v as f32 + 0.5) / tex_res;
+    let uv_u = (u as f32 + 0.5) / width as f32;
+    let uv_v = 1.0 - (v as f32 + 0.5) / height as f32;
     let half = desc.size * 0.5;
     let x = -half + uv_u * desc.size;
     let z = -half + uv_v * desc.size;
     let y = -desc.height_offset;
     let surface_pos = Vec3::new(x, y, z);
     let normal = Vec3::Y;
+    let (b1, b2) = ground_plane_orthonormal_basis(normal);
     let ray_origin = surface_pos + normal * params.bias;
 
     let rays = params.rays.max(1);
@@ -224,8 +237,8 @@ fn ground_plane_ao_cpu(
         let scaled = (i as f32) * GOLDEN_CONJ;
         let phi = 2.0 * std::f32::consts::PI * (scaled - scaled.floor());
         let local_dir = Vec3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta);
-        // Steer to world space (plane normal is +Y)
-        let dir = Vec3::new(local_dir.x, local_dir.z, local_dir.y).normalize();
+        // Steer through the same Duff basis as the shader (for +Y, b2 = -Z).
+        let dir = (local_dir.x * b1 + local_dir.y * b2 + local_dir.z * normal).normalize();
 
         // Raycast against scene triangles
         let mut hit = false;
@@ -283,21 +296,20 @@ fn ground_plane_ao_cpu(
 /// CPU reference: single-texel height (distance along +Y toward scene above).
 #[allow(dead_code)]
 fn ground_plane_height_cpu(
-    plane: &MeshData,
     scene: &MeshData,
     desc: &GroundPlaneDesc,
     params: &GroundPlaneParams,
     texel: (u32, u32),
+    target: (u32, u32),
 ) -> f32 {
-    // Infer texture resolution from plane mesh (ground plane is square with uniform subdivisions)
-    let tex_res = (plane.positions.len() as f32).sqrt() - 1.0;
-    if tex_res < 1.0 {
+    let (width, height) = target;
+    if width == 0 || height == 0 {
         return 0.0;
     }
 
     let (u, v) = texel;
-    let uv_u = (u as f32 + 0.5) / tex_res;
-    let uv_v = (v as f32 + 0.5) / tex_res;
+    let uv_u = (u as f32 + 0.5) / width as f32;
+    let uv_v = 1.0 - (v as f32 + 0.5) / height as f32;
     let half = desc.size * 0.5;
     let x = -half + uv_u * desc.size;
     let z = -half + uv_v * desc.size;
@@ -357,20 +369,19 @@ fn ground_plane_height_cpu(
 /// CPU reference: single-texel ID (FNV-1a hash of hit triangle index).
 #[allow(dead_code)]
 fn ground_plane_id_cpu(
-    plane: &MeshData,
     scene: &MeshData,
     desc: &GroundPlaneDesc,
     texel: (u32, u32),
+    target: (u32, u32),
 ) -> [u8; 4] {
-    // Infer texture resolution from plane mesh (ground plane is square with uniform subdivisions)
-    let tex_res = (plane.positions.len() as f32).sqrt() - 1.0;
-    if tex_res < 1.0 {
+    let (width, height) = target;
+    if width == 0 || height == 0 {
         return [0, 0, 0, 0];
     }
 
     let (u, v) = texel;
-    let uv_u = (u as f32 + 0.5) / tex_res;
-    let uv_v = (v as f32 + 0.5) / tex_res;
+    let uv_u = (u as f32 + 0.5) / width as f32;
+    let uv_v = 1.0 - (v as f32 + 0.5) / height as f32;
     let half = desc.size * 0.5;
     let x = -half + uv_u * desc.size;
     let z = -half + uv_v * desc.size;
@@ -851,6 +862,68 @@ mod gpu_tests {
 
     const TEST_SIZE: u32 = 64;
 
+    /// The generated plane's winding must preserve the UV G-buffer's sample
+    /// positions as well as its face normal. This isolates the position pass
+    /// from the later ground-plane raycasts.
+    #[test]
+    fn ground_plane_position_map_matches_cpu_authority() {
+        let Some((device, queue)) = try_request_device() else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let plane = generate_ground_plane(&ground_plane_desc()).expect("plane gen");
+        let positions = crate::position::bake_position_map(
+            &device,
+            &queue,
+            &plane,
+            &crate::position::PositionMapParams {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+            },
+        )
+        .expect("position map");
+        let normals = crate::position::bake_world_normal_map(
+            &device,
+            &queue,
+            &plane,
+            &crate::position::PositionMapParams {
+                width: TEST_SIZE,
+                height: TEST_SIZE,
+            },
+        )
+        .expect("normal map");
+        let cpu =
+            umber_mesh::UvGBuffer::build(&plane, umber_mesh::FIRST_TILE, TEST_SIZE, TEST_SIZE);
+        for y in 0..TEST_SIZE {
+            for x in 0..TEST_SIZE {
+                let hit = cpu.at(x, y).expect("full plane coverage");
+                let i = &plane.indices[hit.triangle * 3..hit.triangle * 3 + 3];
+                let want = umber_mesh::lerp3(
+                    plane.positions[i[0] as usize],
+                    plane.positions[i[1] as usize],
+                    plane.positions[i[2] as usize],
+                    hit.bary,
+                );
+                let base = ((y * TEST_SIZE + x) * 4) as usize;
+                for axis in 0..3 {
+                    assert!(
+                        (positions[base + axis] - want[axis]).abs() < 1e-5,
+                        "position mismatch at ({x},{y}) axis {axis}: GPU {} vs CPU {}",
+                        positions[base + axis],
+                        want[axis]
+                    );
+                    let expected_normal = if axis == 1 { 1.0 } else { 0.0 };
+                    assert!(
+                        (normals[base + axis] - expected_normal).abs() < 1e-5,
+                        "normal mismatch at ({x},{y}) axis {axis}: GPU {} vs CPU {}",
+                        normals[base + axis],
+                        expected_normal
+                    );
+                }
+            }
+        }
+    }
+
     /// Kittest: `ground_plane_gpu_ao_matches_cpu_texel_for_texel`
     /// Same flat scene, 64², AO only, 16 rays → GPU output layer 0 byte-identical to CPU reference.
     #[test]
@@ -870,12 +943,11 @@ mod gpu_tests {
             bake_ground_plane_mesh(&device, &queue, &scene, &params, TEST_SIZE, TEST_SIZE)
                 .expect("GPU bake should succeed");
         let gpu_ao = gpu_out.ao.expect("AO layer missing");
-
         // CPU reference over all texels
-        let plane = generate_ground_plane(&desc).expect("plane gen");
         for y in 0..TEST_SIZE {
             for x in 0..TEST_SIZE {
-                let cpu_ao = ground_plane_ao_cpu(&plane, &scene, &desc, &params, (x, y));
+                let cpu_ao =
+                    ground_plane_ao_cpu(&scene, &desc, &params, (x, y), (TEST_SIZE, TEST_SIZE));
                 let expected_r = (cpu_ao * 255.0).round() as u8;
                 let gpu_px = texel(&gpu_ao, TEST_SIZE, x, y);
                 assert_eq!(
@@ -910,10 +982,10 @@ mod gpu_tests {
                 .expect("GPU bake should succeed");
         let gpu_height = gpu_out.height.expect("Height layer missing");
 
-        let plane = generate_ground_plane(&desc).expect("plane gen");
         for y in 0..TEST_SIZE {
             for x in 0..TEST_SIZE {
-                let cpu_h = ground_plane_height_cpu(&plane, &scene, &desc, &params, (x, y));
+                let cpu_h =
+                    ground_plane_height_cpu(&scene, &desc, &params, (x, y), (TEST_SIZE, TEST_SIZE));
                 let expected_r = (cpu_h * 255.0).round() as u8;
                 let gpu_px = texel(&gpu_height, TEST_SIZE, x, y);
                 assert_eq!(
@@ -966,10 +1038,9 @@ mod gpu_tests {
                 .expect("GPU bake should succeed");
         let gpu_id = gpu_out.id.expect("ID layer missing");
 
-        let plane = generate_ground_plane(&desc).expect("plane gen");
         for y in 0..TEST_SIZE {
             for x in 0..TEST_SIZE {
-                let cpu_id = ground_plane_id_cpu(&plane, &scene, &desc, (x, y));
+                let cpu_id = ground_plane_id_cpu(&scene, &desc, (x, y), (TEST_SIZE, TEST_SIZE));
                 let gpu_px = texel(&gpu_id, TEST_SIZE, x, y);
                 assert_eq!(
                     gpu_px, cpu_id,
@@ -1008,7 +1079,6 @@ mod gpu_tests {
 
         // Verify AO layer matches single-map AO test
         let gpu_ao = gpu_out.ao.expect("AO layer missing");
-        let plane = generate_ground_plane(&desc).expect("plane gen");
         let ao_params = GroundPlaneParams::new(desc, vec![GroundPlaneMap::Ao]);
         let mut ao_params = ao_params;
         ao_params.rays = 16;
@@ -1016,7 +1086,8 @@ mod gpu_tests {
         ao_params.bias = 0.001;
         for y in 0..TEST_SIZE {
             for x in 0..TEST_SIZE {
-                let cpu_ao = ground_plane_ao_cpu(&plane, &scene, &desc, &ao_params, (x, y));
+                let cpu_ao =
+                    ground_plane_ao_cpu(&scene, &desc, &ao_params, (x, y), (TEST_SIZE, TEST_SIZE));
                 let expected_r = (cpu_ao * 255.0).round() as u8;
                 let gpu_px = texel(&gpu_ao, TEST_SIZE, x, y);
                 assert_eq!(
@@ -1034,7 +1105,13 @@ mod gpu_tests {
         height_params.max_distance = 100.0;
         for y in 0..TEST_SIZE {
             for x in 0..TEST_SIZE {
-                let cpu_h = ground_plane_height_cpu(&plane, &scene, &desc, &height_params, (x, y));
+                let cpu_h = ground_plane_height_cpu(
+                    &scene,
+                    &desc,
+                    &height_params,
+                    (x, y),
+                    (TEST_SIZE, TEST_SIZE),
+                );
                 let expected_r = (cpu_h * 255.0).round() as u8;
                 let gpu_px = texel(&gpu_height, TEST_SIZE, x, y);
                 assert_eq!(
@@ -1048,7 +1125,7 @@ mod gpu_tests {
         let gpu_id = gpu_out.id.expect("ID layer missing");
         for y in 0..TEST_SIZE {
             for x in 0..TEST_SIZE {
-                let cpu_id = ground_plane_id_cpu(&plane, &scene, &desc, (x, y));
+                let cpu_id = ground_plane_id_cpu(&scene, &desc, (x, y), (TEST_SIZE, TEST_SIZE));
                 let gpu_px = texel(&gpu_id, TEST_SIZE, x, y);
                 assert_eq!(gpu_px, cpu_id, "Multi-map ID mismatch at ({x},{y})");
             }
@@ -1213,7 +1290,6 @@ mod tests {
             height_offset: 0.1,
             subdivisions: 32,
         };
-        let plane = generate_ground_plane(&desc).expect("plane gen");
         // Scene: quad at Y=0, size 10x10, plane at Y=-0.1
         // The quad subtends nearly the full upper hemisphere → AO ≈ 0 (fully occluded)
         let scene = MeshData {
@@ -1233,7 +1309,7 @@ mod tests {
 
         // At plane center, the 10x10 quad at distance 0.1 covers ~99% of upper hemisphere
         // With 16 rays, nearly all hit → AO ≈ 0
-        let center_ao = ground_plane_ao_cpu(&plane, &scene, &desc, &params, (16, 16));
+        let center_ao = ground_plane_ao_cpu(&scene, &desc, &params, (16, 16), (32, 32));
         // Solid-angle argument (cross-review D5 MED, resolved 2026-11-18): a quad
         // spanning [-5,5]² at distance 0.1 subtends ~99% of the upper hemisphere,
         // so occlusion ≈ 1 and AO ≈ 0. The brief's original R=128 (0.5) expectation
@@ -1253,14 +1329,13 @@ mod tests {
             height_offset: 0.5,
             subdivisions: 32,
         };
-        let plane = generate_ground_plane(&desc).expect("plane gen");
         let scene = flat_scene(); // Quad at Y=0
         let mut params = GroundPlaneParams::new(desc, vec![GroundPlaneMap::Height]);
         params.max_distance = 10.0;
 
         // Plane at Y=-0.5, scene at Y=0 -> distance 0.5
         // Normalized to max_distance=10.0 -> 0.05
-        let center_h = ground_plane_height_cpu(&plane, &scene, &desc, &params, (16, 16));
+        let center_h = ground_plane_height_cpu(&scene, &desc, &params, (16, 16), (32, 32));
         assert!(
             (center_h - 0.05).abs() < 0.01,
             "Height at center: {}",
@@ -1291,9 +1366,8 @@ mod tests {
             material_names: vec![],
             triangle_materials: Vec::new(),
         };
-        let plane = generate_ground_plane(&desc).expect("plane gen");
 
-        let id_bytes = ground_plane_id_cpu(&plane, &scene, &desc, (16, 16));
+        let id_bytes = ground_plane_id_cpu(&scene, &desc, (16, 16), (32, 32));
         // FNV-1a of triangle index 0
         let mut h: u64 = 2166136261;
         const FNV_PRIME: u64 = 16777619;
