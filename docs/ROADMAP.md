@@ -22,7 +22,7 @@ partner."
 
 ## Current hardening wave (2026-11-26)
 
-GPU parity repair `42ddbedc` is landed and origin-verified; current-tip CI `45760656534` proved Ubuntu fully green and exposed two Windows acceptance failures. Windows follow-up `65ffc37d` now canonicalizes extra mesh directories with original-path fallback and gives only the occluder kittest the established 600-second WARP allowance. Both exact tests 1/0 each, full app 1,284/0 across 11 suites, workspace clippy/static gates GREEN, and independent DeepSeek review SHIP with no findings. Safe-push and fresh two-platform CI remain open; a full-project audit delta follows that verdict. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+GPU and Windows CI hardening is landed and two-platform CI verified at `c14d1baf`. Run `45829837272` succeeded on Ubuntu `139943504609` including GPU and E2E and Windows `139943504498` including tests, WinInk, and release smoke. Both exact regressions 1/0 each, full app 1,284/0 across 11 suites, workspace clippy/static gates GREEN, and independent DeepSeek review SHIP with no findings. Worktree and lock registry are clear. Only the full-project audit delta remains before a renewed code-ready claim. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

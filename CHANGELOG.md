@@ -6,7 +6,7 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
-- **Fixed — Windows CI path identity and WARP budget:** `65ffc37d` canonicalizes extra mesh directories with original-path fallback and gives only the occluder kittest the established 600-second WARP allowance. Both exact regressions 1/0 each, full app 1,284/0 across 11 suites, workspace clippy/static gates GREEN, and independent DeepSeek review SHIP with no findings. Report: `docs/loop/kill-reports/2026-11-26-umber-windows-ci-hardening.md`.
+- **Fixed — Windows CI path identity and WARP budget:** `65ffc37d` canonicalizes extra mesh directories with original-path fallback and gives only the occluder kittest the established 600-second WARP allowance. Both exact regressions 1/0 each, full app 1,284/0 across 11 suites, workspace clippy/static gates GREEN, and independent DeepSeek review SHIP with no findings. Close-out `c14d1baf` is two-platform CI verified at run `45829837272`. Report: `docs/loop/kill-reports/2026-11-26-umber-windows-ci-hardening.md`.
 
 - **Fixed — scheduled-CI GPU parity repair:** `543e038e` repairs 13 live `umber-bake --features gpu` failures from run `45221968683`. Ground-plane +Y winding/rays and exact target-UV/Duff oracle; IdMulti ordinary mask bindings, 32/272-byte ABI, padded views, and Replace-first-covered state. New winding, position/normal, black-Replace, and all-eight-mask regressions. Full bake GPU 206/0; umber-gpu 156/0, mesh lib 167/0 plus integrations; standard/GPU/workspace clippy and static gates GREEN. Independent review `deleg_cf9f2d78` SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-ci-gpu-parity.md`.
 

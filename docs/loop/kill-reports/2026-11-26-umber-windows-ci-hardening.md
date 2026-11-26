@@ -27,7 +27,7 @@ The existing acceptance test was already the regression: it compares DOS short-f
 - Rustfmt, check-layers, scorecard, parity, and `git diff --check`: clean.
 - Independent DeepSeek review at `/home/bessa/.hermes/cache/scratch/umber-windows-ci-hardening-review.log`: **SHIP / NO FINDINGS**. It independently checked canonicalization fallback, first-wins ordering, duplicate semantics, and the test-only timing change. A duplicate review was stopped rather than treated as approval.
 - Sibling coordination: a bounded continuation adopted the reboot-orphaned kill, independently verified it, and stood down when this owner resumed. Its full app log is the 1,284-test battery above. This owner re-locked and committed the same reviewed two-file diff; no duplicate implementation was merged.
-- Final two-platform CI: pending; must be named before closure.
+- Final two-platform CI `45829837272` at `c14d1baf61a263a396cbe09b699152dfcd7e5df8`: **SUCCESS**. Ubuntu `139943504609` passed all steps including GPU and E2E; Windows `139943504498` passed tests, WinInk, and release smoke. Origin/master read-back is the same SHA.
 
 ## Non-goals
 
