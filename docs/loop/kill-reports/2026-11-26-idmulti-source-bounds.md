@@ -27,7 +27,7 @@ The nine-source test was RED before the fix (`is_err` assertion failed), then GR
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
 - Rustfmt, check-layers, scorecard, parity, and `git diff --check`: clean.
 - Independent bounded review `deleg_bc78ff7b`: **SHIP, zero findings**.
-- Final CI: pending if this wave lands code.
+- Final CI `45851497794` at `0d83e5fcea97667cd3b7279cac8a808e7d1fbf0c`: **SUCCESS**. Ubuntu `140018843097` passed all steps including GPU and E2E; Windows `140018842822` passed tests, WinInk, and release smoke. Origin/master read-back is the same SHA.
 
 ## Non-goals
 
