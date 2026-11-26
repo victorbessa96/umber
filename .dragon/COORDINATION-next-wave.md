@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-25:** the earlier code-ready marker was falsified by scheduled CI run `45221968683`: 13 live `umber-bake --features gpu` failures reproduced at current master. Brief `444904f870f21b85e93590b8c2a50f57fcefe220` is committed. The repair is implemented under `razul-ci-gpu-parity`: ground-plane +Y winding/rays and corrected CPU oracle; IdMulti ordinary mask bindings, 32/272-byte ABI, and Replace-first-covered state. Fresh verification: full bake GPU 206/0, umber-gpu 156/0, mesh lib 167/0 plus integrations, standard/GPU/workspace clippy and static gates green. Independent final review `deleg_cf9f2d78` is pending; implementation is not yet committed or pushed. After landing, a fresh audit pass is owed before any renewed code-ready claim.
+**Updated 2026-11-25:** scheduled-CI GPU parity repair `543e038ea9706ee7edd67b27408e7bc51d2b9954` is landed locally with independent `deleg_cf9f2d78` SHIP, brief `444904f870f21b85e93590b8c2a50f57fcefe220` and claim `b1248d6098829ae701e854137d376ce0942a62b4`. It fixes the 13 live failures from run `45221968683`: ground-plane +Y winding/rays and exact target-UV/Duff oracle, plus IdMulti ordinary mask bindings, 32/272-byte ABI, padded views, and Replace-first-covered state. Committed-HEAD full bake GPU 206/0; umber-gpu 156/0, mesh lib 167/0 plus integrations; standard/GPU/workspace clippy and static gates GREEN. Safe-push and current-tip CI remain open. A fresh full-audit delta follows before any renewed code-ready claim.
 
 
 ## Historical coordination snapshots (append-only; not current status)

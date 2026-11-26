@@ -20,9 +20,9 @@ partner."
 
 ---
 
-## Current hardening wave (2026-11-24)
+## Current hardening wave (2026-11-25)
 
-All code-ready lanes are landed and origin-verified. The late GLB writer failure coverage is implemented at `c3565fe7c440bc7b9e3894dda6c0c3e6c5e18f1f` with independent SHIP and a 4-test filter. Origin read-back reached `5457c725da2d8c740aa9386fc08b195536557167`. Only genuine human/product/platform gates remain; the complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
+Scheduled-CI GPU parity repair `543e038e` is landed locally with independent SHIP. It fixes the 13 live failures from run `45221968683`: ground-plane +Y winding/rays and exact target-UV/Duff oracle, plus IdMulti ordinary mask bindings, 32/272-byte ABI, padded views, and Replace-first-covered state. Committed-HEAD full bake GPU 206/0; umber-gpu 156/0, mesh lib 167/0 plus integrations; standard/GPU/workspace clippy and static gates GREEN. Safe-push and current-tip CI remain open. A fresh full-audit delta follows before any renewed code-ready claim. The complete dependency/gate map is `docs/loop/next-steps-2026-11-23.md`.
 
 ## Current vector wave (2026-11-21)
 

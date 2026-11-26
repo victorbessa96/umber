@@ -6,6 +6,8 @@ the source of truth.
 
 ## The November hardening wave — L7 and PerChannel K1 (2026-11-23)
 
+- **Fixed — scheduled-CI GPU parity repair:** `543e038e` repairs 13 live `umber-bake --features gpu` failures from run `45221968683`. Ground-plane +Y winding/rays and exact target-UV/Duff oracle; IdMulti ordinary mask bindings, 32/272-byte ABI, padded views, and Replace-first-covered state. New winding, position/normal, black-Replace, and all-eight-mask regressions. Full bake GPU 206/0; umber-gpu 156/0, mesh lib 167/0 plus integrations; standard/GPU/workspace clippy and static gates GREEN. Independent review `deleg_cf9f2d78` SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-ci-gpu-parity.md`.
+
 - **Tested — late GLB writer failure coverage:** `c3565fe7` pins document-level divisibility and fresh nonexistent-directory writer assertions for invalid geometry. No production behavior changes. GLB filter 4/0, strict export clippy, and independent SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-glb-writer-coverage.md`.
 
 - **Tested — late OBJ writer failure coverage:** `adcf99d7` pins writer-level ragged no-directory assertions and the create_dir_all failure branch. No production behavior changes. OBJ filter 9/0, strict export clippy, and replacement review SHIP. Report: `docs/loop/kill-reports/2026-11-25-umber-obj-writer-coverage.md`.
