@@ -310,6 +310,16 @@ impl BakeSelection {
             Self::GroundPlane => umber_mesh::MeshMapKind::GroundPlane,
         }
     }
+
+    /// The panel's output suffix. IdMulti shares ID's `MeshMapKind` for
+    /// import purposes, but its bake artifact must never overwrite the
+    /// ordinary ID map.
+    fn output_suffix(self) -> &'static str {
+        match self {
+            Self::IdMulti => "id_multi",
+            _ => self.mesh_map_kind().suffix(),
+        }
+    }
 }
 
 /// One finished map write (what the status line summarizes).
@@ -1156,6 +1166,17 @@ struct BakeDispatch<'a> {
     transfer: Option<(TransferSource, Option<umber_mesh::Cage>)>,
 }
 
+/// D3–D5 settings owned alongside the generic bake request. Keeping these
+/// together prevents the worker from silently falling back to defaults.
+#[derive(Clone)]
+struct SpecialBakeParams {
+    ground_plane: umber_bake::ground_plane::GroundPlaneParams,
+    opacity: umber_bake::opacity::OpacityParams,
+    id_multi: umber_bake::IdMultiParams,
+    /// Whether ordinary output names carry a UDIM suffix.
+    tiled: bool,
+}
+
 /// Everything one Bake reads, owned so it can move onto the worker thread
 /// (the `Send + 'static` bound on [`BakeJobHandle::spawn`] pins that at
 /// compile time — a non-`Send` GPU handle here would fail to build).
@@ -1191,6 +1212,7 @@ struct BakeRequest {
     /// A high-to-low transfer (C2-29): when set, the Normal and Height jobs
     /// bake from this HIGH mesh onto `mesh`'s UVs instead of from `mesh`.
     transfer: Option<(TransferSource, Option<umber_mesh::Cage>)>,
+    special: SpecialBakeParams,
 }
 
 /// The HIGH side of a transfer bake (owned, for the worker thread).
@@ -2023,7 +2045,7 @@ impl BakesPanel {
     ) -> PathBuf {
         self.output_dir.join(format!(
             "{texture_set}_{}_{tile}.png",
-            selection.mesh_map_kind().suffix()
+            selection.output_suffix()
         ))
     }
 
@@ -2526,12 +2548,8 @@ impl BakesPanel {
     /// [`umber_mesh::format_mesh_map`] convention
     /// (`<dir>/<set>_<suffix>.png`).
     pub fn output_path_for(&self, texture_set: &str, selection: BakeSelection) -> PathBuf {
-        umber_mesh::format_mesh_map(
-            &self.output_dir,
-            texture_set,
-            selection.mesh_map_kind(),
-            "png",
-        )
+        self.output_dir
+            .join(format!("{texture_set}_{}.png", selection.output_suffix()))
     }
 
     /// The last bake's one-line summary (outputs + timings).
@@ -2774,10 +2792,9 @@ impl BakesPanel {
                                         .clicked()
                                     {
                                         if let Some(path) = rfd::FileDialog::new()
-                                            .add_filter(
-                                                "Image files",
-                                                &["png", "jpg", "jpeg", "exr", "tga"],
-                                            )
+                                            // Masks are exact-value data. Keep the picker to the lossless
+                                            // format the worker decodes; do not advertise JPG/EXR/TGA.
+                                            .add_filter(tr("bakes.id-source-mask"), &["png"])
                                             .pick_file()
                                         {
                                             src.mask_path =
@@ -3549,6 +3566,37 @@ impl BakesPanel {
         let count = jobs.len() + skew_jobs.len();
         let skipped = dispatch.plan.skipped.clone();
         let transfer = std::mem::take(&mut dispatch.transfer);
+        let special = SpecialBakeParams {
+            ground_plane: umber_bake::ground_plane::GroundPlaneParams {
+                desc: umber_mesh::GroundPlaneDesc {
+                    size: self.ground_plane_size,
+                    height_offset: self.ground_plane_height_offset,
+                    subdivisions: self.ground_plane_subdivs,
+                },
+                maps_bitmask: self.ground_plane_maps_bitmask,
+                rays: self.ground_plane_rays,
+                max_distance: self.ground_plane_max_distance,
+                bias: self.ground_plane_bias,
+            },
+            opacity: umber_bake::opacity::OpacityParams {
+                source: match self.opacity_source {
+                    OpacitySource::Cavity => umber_bake::opacity::OpacitySource::Cavity,
+                    OpacitySource::IdMap => umber_bake::opacity::OpacitySource::IdMap,
+                    OpacitySource::Manual => umber_bake::opacity::OpacitySource::Manual,
+                },
+                strength: self.opacity_strength,
+                invert: self.opacity_invert,
+                rays: self.rays,
+                ..umber_bake::opacity::OpacityParams::new()
+            },
+            id_multi: umber_bake::IdMultiParams {
+                sources: self.id_multi_sources.clone(),
+                blend_mode: self.id_multi_blend_mode,
+                width: self.resolution,
+                height: self.resolution,
+            },
+            tiled: dispatch.plan.tiled,
+        };
         let request = BakeRequest {
             device: device.clone(),
             queue: queue.clone(),
@@ -3573,6 +3621,7 @@ impl BakesPanel {
                     cage,
                 )
             }),
+            special,
         };
         #[cfg(test)]
         {
@@ -3729,6 +3778,71 @@ fn raster_margin(
     Ok(pad.fill(raster_source, seams.as_ref(), raw)?)
 }
 
+/// Output path for one GroundPlane result kind. The plane owns a separate
+/// namespace from the source mesh: its AO/height/ID must never overwrite
+/// the ordinary mesh maps selected in the same run.
+fn special_output_path(
+    base: &Path,
+    set: &str,
+    tile: u16,
+    kind: umber_mesh::MeshMapKind,
+    tiled: bool,
+) -> PathBuf {
+    let suffix = format!("ground_plane_{}", kind.suffix());
+    let dir = base.parent().unwrap_or_else(|| Path::new(""));
+    if tiled {
+        dir.join(format!("{set}_{suffix}_{tile}.png"))
+    } else {
+        dir.join(format!("{set}_{suffix}.png"))
+    }
+}
+
+/// Upload one RGBA8 image as a sampled texture. The returned owner must
+/// outlive every view passed into the bake.
+fn rgba_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
+}
+
 fn run_bake(request: BakeRequest) -> BakeOutcome {
     use anyhow::Context as _;
 
@@ -3745,6 +3859,7 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         jobs,
         skew_jobs,
         transfer,
+        special,
     } = request;
     let (device, queue, mesh) = (&device, &queue, &mesh);
     // The occluder scope row (L5b): `true` = the baked set's own RASTER
@@ -3817,6 +3932,244 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         // `plan_bake` routes only AO to `BakeSource::Tile`; every
         // other map's job is a whole-mesh bake.
         let mut skew_clamped = 0usize;
+
+        if selection == BakeSelection::Opacity {
+            let id_bytes = if special.opacity.source == umber_bake::opacity::OpacitySource::IdMap {
+                Some(
+                    umber_bake::id::bake_id_mesh(
+                        device,
+                        queue,
+                        raster_source,
+                        &umber_bake::IdBakeParams {
+                            flavor: umber_bake::IdFlavor::Triangle,
+                            width: size,
+                            height: size,
+                        },
+                    )
+                    .context("opacity ID-map bake")?,
+                )
+            } else {
+                None
+            };
+            let opacity_occluder = if occluder_own_set {
+                raster_source
+            } else {
+                mesh
+            };
+            let raw = umber_bake::opacity::bake_opacity_mesh_with_occluder(
+                device,
+                queue,
+                raster_source,
+                opacity_occluder,
+                &special.opacity,
+                size,
+                size,
+                id_bytes.as_deref(),
+            )
+            .context("opacity bake")?;
+            let filled = raster_margin(
+                &pad,
+                &mut whole_seams,
+                &mut set_seams,
+                raster_source,
+                raster_is_submesh,
+                mesh,
+                raw,
+            )
+            .context("opacity margin")?;
+            let bytes =
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                    .context("opacity dilation")?;
+            // IDs, weights, and opacity strengths are data, not display colour.
+            umber_export::png::write_png(
+                &path,
+                size,
+                size,
+                &bytes,
+                umber_export::png::Transfer::Linear,
+            )
+            .with_context(|| format!("writing {}", path.display()))?;
+            records.push(BakeRecord {
+                selection: Some(selection),
+                set,
+                tile: job.tile,
+                path,
+                elapsed_ms: started.elapsed().as_millis(),
+                skew_clamped,
+            });
+            continue;
+        }
+
+        if selection == BakeSelection::IdMulti {
+            let id_map_texture = if special
+                .id_multi
+                .sources
+                .iter()
+                .any(|src| src.source == umber_bake::IdSource::IdMap)
+            {
+                let bytes = umber_bake::id::bake_id_mesh(
+                    device,
+                    queue,
+                    raster_source,
+                    &umber_bake::IdBakeParams {
+                        flavor: umber_bake::IdFlavor::Triangle,
+                        width: size,
+                        height: size,
+                    },
+                )
+                .context("IdMulti ID-map bake")?;
+                Some(rgba_texture(
+                    device,
+                    queue,
+                    "umber_bake_id_multi_id_map",
+                    size,
+                    size,
+                    &bytes,
+                ))
+            } else {
+                None
+            };
+            let id_map_view = id_map_texture
+                .as_ref()
+                .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+
+            // Materialize every configured mask at the bake resolution;
+            // absent masks remain unbound and keep their source indices.
+            let mut mask_textures = Vec::new();
+            for src in &special.id_multi.sources {
+                if let Some(mask_path) = &src.mask_path {
+                    let (width, height, bytes) =
+                        umber_export::png::read_png_rgba8(std::path::Path::new(mask_path))
+                            .with_context(|| format!("reading IdMulti mask {mask_path}"))?;
+                    if width != size || height != size {
+                        anyhow::bail!(
+                            "IdMulti mask {mask_path} is {width}x{height}, expected {size}x{size}"
+                        );
+                    }
+                    mask_textures.push(rgba_texture(
+                        device,
+                        queue,
+                        "umber_bake_id_multi_mask",
+                        size,
+                        size,
+                        &bytes,
+                    ));
+                }
+            }
+            let mut mask_iter = mask_textures.iter();
+            let mask_views: Vec<_> = special
+                .id_multi
+                .sources
+                .iter()
+                .map(|src| {
+                    src.mask_path.as_ref().map(|_| {
+                        mask_iter
+                            .next()
+                            .expect("one texture per configured mask")
+                            .create_view(&wgpu::TextureViewDescriptor::default())
+                    })
+                })
+                .collect();
+            let mask_refs: Vec<_> = mask_views.iter().map(|view| view.as_ref()).collect();
+            let raw = umber_bake::id::bake_id_multi_mesh(
+                device,
+                queue,
+                raster_source,
+                &special.id_multi,
+                id_map_view.as_ref(),
+                &mask_refs,
+            )
+            .context("IdMulti bake")?;
+            let filled = raster_margin(
+                &pad,
+                &mut whole_seams,
+                &mut set_seams,
+                raster_source,
+                raster_is_submesh,
+                mesh,
+                raw,
+            )
+            .context("IdMulti margin")?;
+            let bytes =
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                    .context("IdMulti dilation")?;
+            // IDs, weights, and opacity strengths are data, not display colour.
+            umber_export::png::write_png(
+                &path,
+                size,
+                size,
+                &bytes,
+                umber_export::png::Transfer::Linear,
+            )
+            .with_context(|| format!("writing {}", path.display()))?;
+            records.push(BakeRecord {
+                selection: Some(selection),
+                set,
+                tile: job.tile,
+                path,
+                elapsed_ms: started.elapsed().as_millis(),
+                skew_clamped,
+            });
+            continue;
+        }
+
+        if selection == BakeSelection::GroundPlane {
+            let ground_occluder = if occluder_own_set {
+                raster_source
+            } else {
+                mesh
+            };
+            let outputs = umber_bake::ground_plane::bake_ground_plane_mesh(
+                device,
+                queue,
+                ground_occluder,
+                &special.ground_plane,
+                size,
+                size,
+            )
+            .context("ground plane bake")?;
+            let plane_mesh = umber_mesh::generate_ground_plane(&special.ground_plane.desc)
+                .context("ground plane margin mesh")?;
+            for (kind, raw) in [
+                (umber_mesh::MeshMapKind::AmbientOcclusion, outputs.ao),
+                (umber_mesh::MeshMapKind::Height, outputs.height),
+                (umber_mesh::MeshMapKind::Id, outputs.id),
+            ] {
+                let Some(raw) = raw else { continue };
+                let out_path = special_output_path(&path, &set, job.tile, kind, special.tiled);
+                let filled = raster_margin(
+                    &pad,
+                    &mut whole_seams,
+                    &mut set_seams,
+                    &plane_mesh,
+                    true,
+                    &plane_mesh,
+                    raw,
+                )
+                .with_context(|| format!("GroundPlane {kind:?} margin"))?;
+                let bytes =
+                    umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                        .with_context(|| format!("GroundPlane {kind:?} dilation"))?;
+                umber_export::png::write_png(
+                    &out_path,
+                    size,
+                    size,
+                    &bytes,
+                    umber_export::png::Transfer::Linear,
+                )
+                .with_context(|| format!("writing {}", out_path.display()))?;
+                records.push(BakeRecord {
+                    selection: Some(selection),
+                    set: set.clone(),
+                    tile: job.tile,
+                    path: out_path,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    skew_clamped,
+                });
+            }
+            continue;
+        }
+
         let bytes: Vec<u8> = match (selection, transfer.as_ref()) {
             // C2-29: a transfer bake's maps come from the HIGH mesh, the
             // same entry point and params as `umber-cli bake-transfer`.
@@ -4753,6 +5106,519 @@ mod tests {
             "WholeMesh reaches the actual BakeRequest too"
         );
         let _ = std::fs::remove_dir_all(h.state().output_dir());
+    }
+
+    /// `read_png_rgba8` flips the file's rows into GPU order. Direct bake
+    /// oracles are GPU-order, so flip them once for the decoded-file compare.
+    fn gpu_order_to_file_order(bytes: &[u8], size: u32) -> Vec<u8> {
+        let stride = size as usize * 4;
+        let mut out = vec![0u8; bytes.len()];
+        for (dst, src) in (0..size as usize).zip((0..size as usize).rev()) {
+            out[dst * stride..(dst + 1) * stride]
+                .copy_from_slice(&bytes[src * stride..(src + 1) * stride]);
+        }
+        out
+    }
+
+    #[test]
+    fn special_output_names_never_collide_with_mesh_maps() {
+        let panel = BakesPanel::new(PathBuf::from("bakes"));
+        assert_eq!(
+            panel.output_path_for("Quad", BakeSelection::IdMulti),
+            PathBuf::from("bakes/Quad_id_multi.png")
+        );
+        assert_eq!(
+            panel.tiled_output_path_for("Quad", BakeSelection::IdMulti, 1002),
+            PathBuf::from("bakes/Quad_id_multi_1002.png")
+        );
+        assert_ne!(
+            panel.output_path_for("Quad", BakeSelection::IdMulti),
+            panel.output_path_for("Quad", BakeSelection::Id)
+        );
+
+        let base = Path::new("bakes/Quad_ground_plane.png");
+        for tiled in [false, true] {
+            let paths = [
+                umber_mesh::MeshMapKind::AmbientOcclusion,
+                umber_mesh::MeshMapKind::Height,
+                umber_mesh::MeshMapKind::Id,
+            ]
+            .map(|kind| special_output_path(base, "Quad", 1001, kind, tiled));
+            let unique: std::collections::BTreeSet<_> = paths.iter().collect();
+            assert_eq!(unique.len(), 3);
+            for (path, kind) in paths.iter().zip([
+                umber_mesh::MeshMapKind::AmbientOcclusion,
+                umber_mesh::MeshMapKind::Height,
+                umber_mesh::MeshMapKind::Id,
+            ]) {
+                assert_ne!(
+                    *path,
+                    umber_mesh::format_mesh_map(Path::new("bakes"), "Quad", kind, "png")
+                );
+                assert!(path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("Quad_ground_plane_"));
+            }
+        }
+    }
+
+    #[test]
+    fn d3_d5_maps_execute_through_app_worker() {
+        let gpu = try_request_gpu().expect("real GPU adapter required for D3-D5 worker coverage");
+        let mesh = umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let out = std::env::temp_dir().join(format!("umber-d3-d5-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let panel = BakesPanel::new(out.clone());
+        let selections = [
+            BakeSelection::Opacity,
+            BakeSelection::IdMulti,
+            BakeSelection::Ao,
+            BakeSelection::Id,
+            BakeSelection::GroundPlane,
+        ];
+        let jobs = selections
+            .into_iter()
+            .map(|selection| {
+                (
+                    BakeJob {
+                        selection,
+                        tile: FIRST_TILE,
+                        source: BakeSource::WholeMesh,
+                    },
+                    panel.output_path_for("Quad", selection),
+                    "Quad".to_string(),
+                    None,
+                )
+            })
+            .collect();
+        let mut special = SpecialBakeParams {
+            ground_plane: umber_bake::ground_plane::GroundPlaneParams {
+                desc: umber_mesh::GroundPlaneDesc {
+                    size: 10.0,
+                    height_offset: 0.1,
+                    subdivisions: 32,
+                },
+                maps_bitmask: 1 | 2 | 4,
+                rays: 16,
+                max_distance: 100.0,
+                bias: 0.001,
+            },
+            opacity: umber_bake::opacity::OpacityParams {
+                source: umber_bake::opacity::OpacitySource::Manual,
+                strength: 0.25,
+                invert: false,
+                rays: 16,
+                ..umber_bake::opacity::OpacityParams::new()
+            },
+            id_multi: umber_bake::IdMultiParams {
+                sources: vec![IdSourceParams {
+                    source: IdSource::IdMap,
+                    weight: 1.0,
+                    mask_path: None,
+                    color: [255, 255, 255],
+                }],
+                blend_mode: IdBlendMode::Replace,
+                width: 64,
+                height: 64,
+            },
+            tiled: false,
+        };
+        let request = BakeRequest {
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            mesh: mesh.clone(),
+            size: 64,
+            rays: 16,
+            occluder_own_set: false,
+            dilation_iterations: 0,
+            margin: MarginType::Extend,
+            skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            jobs,
+            skew_jobs: Vec::new(),
+            transfer: None,
+            special: special.clone(),
+        };
+        let expected_ground = umber_bake::ground_plane::bake_ground_plane_mesh(
+            &gpu.device,
+            &gpu.queue,
+            &mesh,
+            &special.ground_plane,
+            64,
+            64,
+        )
+        .expect("direct GroundPlane oracle");
+        let records = run_bake(request).expect("D3-D5 selections execute through the worker");
+        assert_eq!(
+            records.len(),
+            7,
+            "Opacity + IdMulti + ordinary AO/ID + Ground AO/Height/ID"
+        );
+        let unique_paths: std::collections::BTreeSet<_> =
+            records.iter().map(|record| &record.path).collect();
+        assert_eq!(
+            unique_paths.len(),
+            records.len(),
+            "no map may overwrite another map's output: {records:?}"
+        );
+        for (name, raw) in [
+            ("ambient_occlusion", expected_ground.ao),
+            ("height", expected_ground.height),
+            ("id", expected_ground.id),
+        ] {
+            let path = out.join(format!("Quad_ground_plane_{name}.png"));
+            let (_w, _h, decoded) = umber_export::png::read_png_rgba8(&path)
+                .unwrap_or_else(|e| panic!("GroundPlane {name} missing at {path:?}: {e}"));
+            let raw = gpu_order_to_file_order(&raw.expect("selected GroundPlane output"), 64);
+            if let Some(index) = decoded
+                .iter()
+                .zip(&raw)
+                .position(|(actual, expected)| actual != expected)
+            {
+                panic!(
+                    "{name} first mismatch at byte {index}: decoded {} expected {} (decoded len {}, raw len {})",
+                    decoded[index],
+                    raw[index],
+                    decoded.len(),
+                    raw.len()
+                );
+            }
+            assert_eq!(decoded.len(), raw.len(), "{name} output length");
+        }
+
+        let opacity_path = &records
+            .iter()
+            .find(|record| record.selection == Some(BakeSelection::Opacity))
+            .expect("opacity record")
+            .path;
+        let (_w, _h, opacity) = umber_export::png::read_png_rgba8(opacity_path).unwrap();
+        let expected_opacity = umber_bake::opacity::bake_opacity_mesh(
+            &gpu.device,
+            &gpu.queue,
+            &mesh,
+            &special.opacity,
+            64,
+            64,
+            None,
+        )
+        .expect("direct opacity oracle");
+        assert_eq!(
+            opacity,
+            gpu_order_to_file_order(&expected_opacity, 64),
+            "25% opacity stays linear"
+        );
+
+        let id_multi_path = &records
+            .iter()
+            .find(|record| record.selection == Some(BakeSelection::IdMulti))
+            .expect("IdMulti record")
+            .path;
+        let (_w, _h, id_multi) = umber_export::png::read_png_rgba8(id_multi_path).unwrap();
+        let expected_id = umber_bake::id::bake_id_mesh(
+            &gpu.device,
+            &gpu.queue,
+            &mesh,
+            &umber_bake::IdBakeParams {
+                flavor: umber_bake::IdFlavor::Triangle,
+                width: 64,
+                height: 64,
+            },
+        )
+        .expect("direct ID-map oracle");
+        assert_eq!(
+            id_multi,
+            gpu_order_to_file_order(&expected_id, 64),
+            "IdMap source uses the actual ID texture"
+        );
+        special.opacity.source = umber_bake::opacity::OpacitySource::IdMap;
+        special.opacity.strength = 1.0;
+        let id_opacity = run_bake(BakeRequest {
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            mesh: mesh.clone(),
+            size: 64,
+            rays: 16,
+            occluder_own_set: false,
+            dilation_iterations: 0,
+            margin: MarginType::Extend,
+            skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            jobs: vec![(
+                BakeJob {
+                    selection: BakeSelection::Opacity,
+                    tile: FIRST_TILE,
+                    source: BakeSource::WholeMesh,
+                },
+                out.join("id_map_opacity.png"),
+                "Quad".to_string(),
+                None,
+            )],
+            skew_jobs: Vec::new(),
+            transfer: None,
+            special: special.clone(),
+        })
+        .expect("Opacity IdMap composes its own ID bake in the worker");
+        assert_eq!(id_opacity.len(), 1);
+        let (_w, _h, rgba) = umber_export::png::read_png_rgba8(&id_opacity[0].path).unwrap();
+        assert!(
+            rgba.chunks_exact(4).all(|px| px[0] == 255 && px[3] == 255),
+            "a fully covered ID map makes every opacity texel opaque"
+        );
+
+        let mask_path = out.join("rejecting-mask.png");
+        umber_export::png::write_png(
+            &mask_path,
+            64,
+            64,
+            &vec![0u8; 64 * 64 * 4],
+            umber_export::png::Transfer::Linear,
+        )
+        .unwrap();
+        special.id_multi.sources = vec![
+            IdSourceParams {
+                source: IdSource::Manual,
+                weight: 1.0,
+                mask_path: Some(mask_path.to_string_lossy().into_owned()),
+                color: [255, 0, 0],
+            },
+            IdSourceParams {
+                source: IdSource::Manual,
+                weight: 1.0,
+                mask_path: None,
+                color: [0, 0, 0],
+            },
+            IdSourceParams {
+                source: IdSource::Manual,
+                weight: 1.0,
+                mask_path: None,
+                color: [0, 255, 0],
+            },
+        ];
+        special.id_multi.blend_mode = IdBlendMode::Replace;
+        let masked = run_bake(BakeRequest {
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            mesh,
+            size: 64,
+            rays: 16,
+            occluder_own_set: false,
+            dilation_iterations: 0,
+            margin: MarginType::Extend,
+            skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            jobs: vec![(
+                BakeJob {
+                    selection: BakeSelection::IdMulti,
+                    tile: FIRST_TILE,
+                    source: BakeSource::WholeMesh,
+                },
+                out.join("id_multi_masked.png"),
+                "Quad".to_string(),
+                None,
+            )],
+            skew_jobs: Vec::new(),
+            transfer: None,
+            special,
+        })
+        .expect("IdMulti loads masks in the worker");
+        assert_eq!(masked.len(), 1);
+        let (_w, _h, rgba) = umber_export::png::read_png_rgba8(&masked[0].path).unwrap();
+        assert_eq!(
+            &rgba[..4],
+            &[0, 0, 0, 255],
+            "the masked red falls through and the covered black source wins"
+        );
+        let _ = std::fs::remove_dir_all(out);
+    }
+
+    #[test]
+    fn whole_mesh_occlusion_reaches_cavity_and_ground_plane() {
+        let gpu = try_request_gpu().expect("real GPU adapter required for occlusion coverage");
+        let mesh = umber_mesh::MeshData {
+            positions: vec![
+                // Material A: raised, partly overlapping B and extending beyond it.
+                [0.0, 0.5, -1.0],
+                [0.0, 0.5, 1.0],
+                [2.0, 0.5, 1.0],
+                [2.0, 0.5, -1.0],
+                // Material B: the raster target.
+                [1.0, 0.0, -1.0],
+                [1.0, 0.0, 1.0],
+                [3.0, 0.0, 1.0],
+                [3.0, 0.0, -1.0],
+            ],
+            normals: vec![[0.0, 1.0, 0.0]; 8],
+            uvs: vec![
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec!["A".into(), "B".into()],
+            triangle_materials: vec![0, 0, 1, 1],
+        };
+        let raster_b = mesh.submesh_for_material(1);
+        let ground_params = umber_bake::ground_plane::GroundPlaneParams {
+            desc: umber_mesh::GroundPlaneDesc {
+                size: 10.0,
+                height_offset: 0.1,
+                subdivisions: 2,
+            },
+            maps_bitmask: 1,
+            rays: 16,
+            max_distance: 100.0,
+            bias: 0.001,
+        };
+        let opacity_params = umber_bake::opacity::OpacityParams {
+            source: umber_bake::opacity::OpacitySource::Cavity,
+            strength: 1.0,
+            invert: false,
+            rays: 16,
+            ..umber_bake::opacity::OpacityParams::new()
+        };
+        let ground_whole = umber_bake::ground_plane::bake_ground_plane_mesh(
+            &gpu.device,
+            &gpu.queue,
+            &mesh,
+            &ground_params,
+            64,
+            64,
+        )
+        .expect("WholeMesh ground oracle")
+        .ao
+        .expect("AO selected");
+        let ground_own = umber_bake::ground_plane::bake_ground_plane_mesh(
+            &gpu.device,
+            &gpu.queue,
+            &raster_b,
+            &ground_params,
+            64,
+            64,
+        )
+        .expect("OwnSet ground oracle")
+        .ao
+        .expect("AO selected");
+        assert_ne!(
+            ground_whole, ground_own,
+            "the fixture must distinguish occlusion scopes"
+        );
+        let opacity_whole = umber_bake::opacity::bake_opacity_mesh_with_occluder(
+            &gpu.device,
+            &gpu.queue,
+            &raster_b,
+            &mesh,
+            &opacity_params,
+            64,
+            64,
+            None,
+        )
+        .expect("WholeMesh opacity oracle");
+        let opacity_own = umber_bake::opacity::bake_opacity_mesh_with_occluder(
+            &gpu.device,
+            &gpu.queue,
+            &raster_b,
+            &raster_b,
+            &opacity_params,
+            64,
+            64,
+            None,
+        )
+        .expect("OwnSet opacity oracle");
+        assert_ne!(
+            opacity_whole, opacity_own,
+            "Cavity must see the other material"
+        );
+
+        let out = std::env::temp_dir().join(format!("umber-d3d5-occlusion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        for own_set in [false, true] {
+            let dir = out.join(if own_set { "own" } else { "whole" });
+            let jobs = vec![
+                (
+                    BakeJob {
+                        selection: BakeSelection::Opacity,
+                        tile: FIRST_TILE,
+                        source: BakeSource::WholeMesh,
+                    },
+                    dir.join("opacity.png"),
+                    "B".to_string(),
+                    Some(raster_b.clone()),
+                ),
+                (
+                    BakeJob {
+                        selection: BakeSelection::GroundPlane,
+                        tile: FIRST_TILE,
+                        source: BakeSource::WholeMesh,
+                    },
+                    dir.join("ground.png"),
+                    "B".to_string(),
+                    Some(raster_b.clone()),
+                ),
+            ];
+            let records = run_bake(BakeRequest {
+                device: gpu.device.clone(),
+                queue: gpu.queue.clone(),
+                mesh: mesh.clone(),
+                size: 64,
+                rays: 16,
+                occluder_own_set: own_set,
+                dilation_iterations: 0,
+                margin: MarginType::Extend,
+                skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+                jobs,
+                skew_jobs: Vec::new(),
+                transfer: None,
+                special: SpecialBakeParams {
+                    ground_plane: ground_params,
+                    opacity: opacity_params,
+                    id_multi: umber_bake::IdMultiParams::default(),
+                    tiled: false,
+                },
+            })
+            .expect("occlusion-scoped worker bake");
+            assert_eq!(records.len(), 2);
+            let (_w, _h, ground) = umber_export::png::read_png_rgba8(
+                &dir.join("B_ground_plane_ambient_occlusion.png"),
+            )
+            .expect("ground output");
+            assert_eq!(
+                ground,
+                gpu_order_to_file_order(if own_set { &ground_own } else { &ground_whole }, 64),
+                "GroundPlane scope must match the request (own_set={own_set})"
+            );
+            let (_w, _h, opacity) = umber_export::png::read_png_rgba8(&dir.join("opacity.png"))
+                .expect("opacity output");
+            assert_eq!(
+                opacity,
+                gpu_order_to_file_order(
+                    if own_set {
+                        &opacity_own
+                    } else {
+                        &opacity_whole
+                    },
+                    64
+                ),
+                "Cavity scope must match the request (own_set={own_set})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(out);
     }
 
     use super::*;

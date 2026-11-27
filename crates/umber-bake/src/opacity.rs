@@ -250,12 +250,30 @@ pub fn bake_opacity_mesh(
     height: u32,
     id_map: Option<&[u8]>,
 ) -> Result<Vec<u8>, OpacityBakeError> {
+    bake_opacity_mesh_with_occluder(device, queue, mesh, mesh, params, width, height, id_map)
+}
+
+/// Opacity with independent raster and occlusion meshes. The position map
+/// comes from `mesh`; Cavity rays test `occluder`, matching the AO entry's
+/// WholeMesh-vs-OwnSet contract. Passing the same mesh twice is identical to
+/// [`bake_opacity_mesh`].
+#[allow(clippy::too_many_arguments)]
+pub fn bake_opacity_mesh_with_occluder(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mesh: &MeshData,
+    occluder: &MeshData,
+    params: &OpacityParams,
+    width: u32,
+    height: u32,
+    id_map: Option<&[u8]>,
+) -> Result<Vec<u8>, OpacityBakeError> {
     profiling::scope!("bake_pass");
     validate(params, width, height, id_map.is_some())?;
 
     let position_map = bake_position_and_normal(device, queue, mesh, width, height)?;
 
-    let triangles = build_triangles(mesh);
+    let triangles = build_triangles(occluder);
     let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("umber_bake_opacity_triangles"),
         contents: bytemuck::cast_slice(&triangles),
