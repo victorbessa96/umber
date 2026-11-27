@@ -54,6 +54,14 @@ else
     FAIL=1
 fi
 
+echo "=== parity ==="
+if python3 scripts/parity.py --check; then
+    echo "PASS parity"
+else
+    echo "FAIL parity (scripts/parity.py --check)"
+    FAIL=1
+fi
+
 echo "=== fmt ==="
 if flock /tmp/umber-cargo.lock cargo fmt --all; then
     echo "PASS fmt (applied)"

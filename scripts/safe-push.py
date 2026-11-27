@@ -13,15 +13,16 @@ guard pushes HEAD to origin/master only when all of these hold:
   3. fmt      `cargo fmt --all --check` is clean.
   4. score    `python3 scripts/scorecard.py --check` passes.
   5. layers   `python3 scripts/check-layers.py` reports GREEN.
-  6. clippy   `cargo clippy -p <affected> --all-targets --no-deps -- -D warnings`.
-  7. test     `cargo test -p <affected>`.
+  6. parity   `python3 scripts/parity.py --check` passes.
+  7. clippy   `cargo clippy -p <affected> --all-targets --no-deps -- -D warnings`.
+  8. test     `cargo test -p <affected>`.
 
-Gates 6-7 exist because CI no longer runs on every push (2026-11-06,
+Gates 7-8 exist because CI no longer runs on every push (2026-11-06,
 Bessa: CI runs at version bumps via scripts/release-ci.sh, weekly, and on
 PRs). <affected> = the workspace crates the pushed range touches plus
 every crate that depends on them; a root Cargo.toml / Cargo.lock /
 rust-toolchain.toml / .cargo change means every crate, `assets/` means
-umber-app, a docs-only or scripts/.github-only range means none (the
+umber-core, umber-cli, umber-gui, and umber-app, a docs-only or scripts/.github-only range means none (the
 cargo gates are skipped and say so). An unknown path fails closed (every
 crate). Cargo runs under the shared `flock /tmp/umber-cargo.lock nice -n
 19` with the tree's own target dir (warm cache), CARGO_BUILD_JOBS=3,
@@ -245,8 +246,9 @@ def affected_crates(tree, changed):
                 return sorted(names)  # a crate dir we cannot place: everything
             touched.add(by_dir[parts[1]])
         elif path.startswith("assets/"):
-            if "umber-app" in names:
-                touched.add("umber-app")
+            for name in ("umber-core", "umber-cli", "umber-gui", "umber-app"):
+                if name in names:
+                    touched.add(name)
         elif is_docs_only(path) or path.startswith(NON_CARGO_PREFIXES):
             continue
         else:
@@ -323,6 +325,13 @@ def main() -> int:
             ["python3", "scripts/check-layers.py"],
             lambda out: "GREEN" in out,
             "fix the crate-layer violation the script names (DECISIONS.md layering rule)",
+        )
+        check_gate(
+            gate_tree,
+            "parity",
+            ["python3", "scripts/parity.py", "--check"],
+            lambda _: True,
+            "run `python3 scripts/parity.py` to regenerate docs/parity.md, then commit",
         )
         changed = sh(root, "git", "diff", "--name-only", f"{upstream}...{head}", check=True)
         crates = affected_crates(gate_tree, [p for p in changed.stdout.splitlines() if p])

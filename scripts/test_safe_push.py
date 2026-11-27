@@ -50,15 +50,17 @@ class Repo:
         self.set_gate("fmt", 0)
         self.set_gate("score", 0)
         self.set_gate("layers", 0)
+        self.set_gate("parity", 0)
         self.set_gate("clippy", 0)
         self.set_gate("test", 0)
-        # Three crates: core <- paint <- app (app also on core), plus gui
-        # standalone, so the reverse-dependency closure is observable.
+        # Core <- paint <- app (app also on core), plus gui/cli standalone,
+        # so reverse-dependency closure and asset fan-out are observable.
         for d, deps in (
             ("umber-core", []),
             ("umber-paint", ["umber-core"]),
             ("umber-app", ["umber-paint", "umber-core"]),
             ("umber-gui", []),
+            ("umber-cli", []),
         ):
             os.makedirs(os.path.join(self.tree, "crates", d, "src"))
             lines = [f'[package]\nname = "{d}"\n\n[dependencies]']
@@ -96,6 +98,9 @@ class Repo:
             )
         elif gate == "score":
             path = os.path.join(self.tree, "scripts", "scorecard.py")
+            body = f"import sys\nsys.exit({code})\n"
+        elif gate == "parity":
+            path = os.path.join(self.tree, "scripts", "parity.py")
             body = f"import sys\nsys.exit({code})\n"
         else:
             path = os.path.join(self.tree, "scripts", "check-layers.py")
@@ -242,7 +247,7 @@ def non_fast_forward_refused():
 
 @case
 def failing_gates_refused():
-    for gate in ("fmt", "score", "layers", "clippy", "test"):
+    for gate in ("fmt", "score", "layers", "parity", "clippy", "test"):
         r = Repo()
         try:
             # The gates read the pushed commit's tree, so a failing gate
@@ -390,10 +395,24 @@ def a_lockfile_or_unknown_path_gates_every_crate():
             r.commit(path, ME)
             code, out = r.guard()
             expect(code == 0, f"{path}: exit {code}: {out}")
-            want = ["umber-app", "umber-core", "umber-gui", "umber-paint"]
+            want = ["umber-app", "umber-cli", "umber-core", "umber-gui", "umber-paint"]
             expect(r.gated_crates("test") == want, f"{path}: test on {r.gated_crates('test')}")
         finally:
             r.close()
+
+
+@case
+def an_asset_change_gates_every_asset_consumer():
+    r = Repo()
+    try:
+        r.commit("assets/brushes/hard-round.umberbrush", ME)
+        code, out = r.guard()
+        expect(code == 0, f"exit {code}: {out}")
+        want = ["umber-app", "umber-cli", "umber-core", "umber-gui", "umber-paint"]
+        expect(r.gated_crates("clippy") == want, f"clippy on {r.gated_crates('clippy')}")
+        expect(r.gated_crates("test") == want, f"test on {r.gated_crates('test')}")
+    finally:
+        r.close()
 
 
 @case

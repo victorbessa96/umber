@@ -30,7 +30,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TEST_ATTR = re.compile(r"^\s*#\[test\]", re.MULTILINE)
-SPAN = re.compile(r"(<!-- scorecard:([a-z-]+) -->)(.*?)(<!-- /scorecard -->)")
+SPAN = re.compile(r"(<!--\s*scorecard:([^>]*?)-->)(.*?)(<!--\s*/scorecard\s*-->)")
+OPEN_TOKEN = re.compile(r"<!--\s*scorecard:")
+CLOSE_TOKEN = re.compile(r"<!--\s*/scorecard\s*-->")
 
 
 def crate_count() -> int:
@@ -54,6 +56,7 @@ def values() -> dict[str, str]:
     tests = test_count()
     return {
         "crates": str(crate_count()),
+        "crates-layout": str(crate_count()),
         "tests": rounded_down(tests),
         "tests-exact": f"{tests:,}",
     }
@@ -65,7 +68,7 @@ def rewrite(text: str, vals: dict[str, str]) -> tuple[str, list[str]]:
     changed: list[str] = []
 
     def sub(m: re.Match) -> str:
-        name = m.group(2)
+        name = m.group(2).strip()
         if name not in vals:
             raise SystemExit(f"scorecard: unknown marker {name!r} (known: {sorted(vals)})")
         if m.group(3) != vals[name]:
@@ -73,6 +76,26 @@ def rewrite(text: str, vals: dict[str, str]) -> tuple[str, list[str]]:
         return f"{m.group(1)}{vals[name]}{m.group(4)}"
 
     return SPAN.sub(sub, text), changed
+
+
+def validate_markers(text: str, vals: dict[str, str]) -> None:
+    """Require exactly one of every expected marker and no unknown names."""
+    matches = list(SPAN.finditer(text))
+    if (
+        len(OPEN_TOKEN.findall(text)) != len(matches)
+        or len(CLOSE_TOKEN.findall(text)) != len(matches)
+    ):
+        raise SystemExit("scorecard: malformed or unclosed marker")
+    names = [m.group(2).strip() for m in matches]
+    for name in names:
+        if name not in vals:
+            raise SystemExit(f"scorecard: unknown marker {name!r} (known: {sorted(vals)})")
+    for name in vals:
+        count = names.count(name)
+        if count == 0:
+            raise SystemExit(f"scorecard: missing required marker {name!r}")
+        if count > 1:
+            raise SystemExit(f"scorecard: duplicate marker {name!r} ({count} copies)")
 
 
 def main(argv: list[str]) -> int:
@@ -86,6 +109,7 @@ def main(argv: list[str]) -> int:
     if not SPAN.search(text):
         print("scorecard: README.md has no scorecard markers", file=sys.stderr)
         return 1
+    validate_markers(text, vals)
     new, changed = rewrite(text, vals)
     if "--check" in argv:
         if changed:
