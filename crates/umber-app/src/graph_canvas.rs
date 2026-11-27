@@ -58,8 +58,12 @@ const GRID_SPACING: f32 = 32.0;
 const WHEEL_ZOOM_RATE: f32 = 0.002;
 /// Canvas widget height in pixels (the width fills the panel).
 const CANVAS_HEIGHT: f32 = 360.0;
-/// The output node's accent (border, pending noodle).
-const OUTPUT_ACCENT: egui::Color32 = egui::Color32::from_rgb(232, 160, 64);
+/// The output node's semantic foreground (border, pending noodle, port).
+/// Theme text clears the non-text floor where the old hard-coded gold did
+/// not, especially on Light panel surfaces.
+fn output_accent() -> egui::Color32 {
+    umber_gui::theme::graphic_fg()
+}
 
 /// Scatter multiplier: Knuth's multiplicative-hash constant
 /// (`floor(2^32 / phi)`). It is odd mod 64 (`2654435761 % 64 == 49`), so
@@ -790,7 +794,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, panel: &mut GraphPanel) {
                 .collect();
             painter.add(egui::Shape::line(
                 points,
-                egui::Stroke::new(2.0, OUTPUT_ACCENT),
+                egui::Stroke::new(2.0, output_accent()),
             ));
         }
     }
@@ -811,7 +815,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, panel: &mut GraphPanel) {
             visuals.widgets.inactive.bg_fill
         };
         let stroke = if is_output {
-            egui::Stroke::new(if selected { 3.0 } else { 2.0 }, OUTPUT_ACCENT)
+            egui::Stroke::new(if selected { 3.0 } else { 2.0 }, output_accent())
         } else if selected {
             egui::Stroke::new(2.0, visuals.selection.stroke.color)
         } else {
@@ -846,7 +850,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, panel: &mut GraphPanel) {
         }
         let out_at = to_pos(view.to_screen(port_position(&layout.rect, PortSide::Output)));
         let out_fill = if is_output {
-            OUTPUT_ACCENT
+            output_accent()
         } else {
             visuals.widgets.active.bg_fill
         };
@@ -917,6 +921,17 @@ mod tests {
             node_def: "test".into(),
             rect: node_rect(id, Some(min)),
             inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn graphic_foreground_clears_the_all_theme_contrast_gate() {
+        for theme in umber_gui::theme::Theme::ALL {
+            let tokens = theme.tokens();
+            assert!(
+                umber_gui::theme::contrast_ratio(tokens.text, tokens.panel) >= 3.0,
+                "{theme:?}: graphic foreground on panel is below 3:1"
+            );
         }
     }
 

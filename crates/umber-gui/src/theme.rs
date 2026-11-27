@@ -644,6 +644,14 @@ pub fn text() -> Color32 {
     tokens().text
 }
 
+/// Foreground for meaningful non-text graphics (node borders, ports,
+/// curve handles). The primary-text token clears the 3:1 non-text floor
+/// on panel and raised surfaces in every theme; hard-coded accent/white
+/// choices do not.
+pub fn graphic_fg() -> Color32 {
+    tokens().text
+}
+
 /// Muted text (labels, units).
 pub fn muted() -> Color32 {
     tokens().text_muted

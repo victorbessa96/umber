@@ -24,9 +24,7 @@
 //! free of umber-brush: a consumer converts its own curve type to and from
 //! [`Curve::points`].
 
-use egui::{
-    Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
-};
+use egui::{Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType};
 
 use crate::theme;
 
@@ -36,6 +34,8 @@ pub const MIN_GAP: f32 = 0.01;
 const HANDLE_RADIUS: f32 = 6.0;
 /// Grid divisions per axis.
 const GRID_DIVS: usize = 4;
+/// Keyboard adjustment per arrow press in normalized curve space.
+const CURVE_KEYBOARD_STEP: f32 = 0.01;
 
 /// Why an edit or a parse was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,55 +304,99 @@ impl<'a> CurveEdit<'a> {
     /// Draws the plot and applies this frame's input; `changed()` when the
     /// curve changed.
     pub fn show(self, ui: &mut Ui) -> egui::Response {
-        let (rect, mut response) =
-            ui.allocate_exact_size(Vec2::splat(self.size), Sense::click_and_drag());
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
         // g7-accesskit-sweep: the curve editor canvas (an editor, not a
         // static plot — Slider role carries the keyboard-adjacency).
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, true, "curve"));
         let curve = self.curve;
-        let drag_id = response.id.with("curve-drag");
-
-        if response.drag_started() {
-            let picked = response
-                .interact_pointer_pos()
-                .and_then(|pos| pick_point(curve, rect, pos, HANDLE_RADIUS));
-            ui.ctx().data_mut(|d| d.insert_temp(drag_id, picked));
-        }
-        if response.dragged() {
-            let dragging: Option<usize> = ui.ctx().data(|d| d.get_temp(drag_id)).flatten();
-            if let (Some(i), Some(pos)) = (dragging, response.interact_pointer_pos()) {
-                let (x, y) = from_screen(rect, pos);
-                if curve.move_point(i, x, y) {
-                    response.mark_changed();
-                }
-            }
-        }
-        if response.drag_stopped() {
-            ui.ctx().data_mut(|d| d.remove::<Option<usize>>(drag_id));
-        }
-        if !self.fixed_count {
-            if response.clicked() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    if pick_point(curve, rect, pos, HANDLE_RADIUS).is_none() {
-                        let (x, y) = from_screen(rect, pos);
-                        if curve.insert(x, y).is_ok() {
-                            response.mark_changed();
-                        }
+        if !self.fixed_count && response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if pick_point(curve, rect, pos, HANDLE_RADIUS).is_none() {
+                    let (x, y) = from_screen(rect, pos);
+                    if curve.insert(x, y).is_ok() {
+                        response.mark_changed();
                     }
                 }
             }
-            if response.secondary_clicked() {
-                let hit = response
-                    .interact_pointer_pos()
-                    .and_then(|pos| pick_point(curve, rect, pos, HANDLE_RADIUS));
-                if hit.is_some_and(|i| curve.remove(i).is_ok()) {
-                    response.mark_changed();
+        }
+
+        // Each point owns its direct-hit input: drag-to-move, secondary-click
+        // delete, and named keyboard/AccessKit control. The canvas above keeps
+        // only click-to-insert, so the topmost handle cannot starve it.
+        let mut focused_point = None;
+        let mut hot_point = None;
+        for i in 0..curve.points().len() {
+            let centre = to_screen(rect, curve.points()[i]);
+            let grab = Rect::from_center_size(centre, Vec2::splat(HANDLE_RADIUS * 2.0));
+            let point_response = ui.interact(
+                grab,
+                response.id.with(("curve-point", i)),
+                Sense::click_and_drag(),
+            );
+            point_response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Slider, true, format!("curve point {}", i + 1))
+            });
+            if point_response.hovered() || point_response.dragged() {
+                hot_point = Some(i);
+            }
+            if point_response.dragged() {
+                if let Some(pos) = point_response.interact_pointer_pos() {
+                    let (x, y) = from_screen(rect, pos);
+                    if curve.move_point(i, x, y) {
+                        response.mark_changed();
+                    }
+                }
+            }
+            if !self.fixed_count && point_response.secondary_clicked() && curve.remove(i).is_ok() {
+                response.mark_changed();
+                break;
+            }
+            if point_response.has_focus() {
+                focused_point = Some(i);
+                let (x, y) = curve.points()[i];
+                let mut delta = (0.0, 0.0);
+                ui.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                        delta.0 -= CURVE_KEYBOARD_STEP;
+                    }
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                        delta.0 += CURVE_KEYBOARD_STEP;
+                    }
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        delta.1 += CURVE_KEYBOARD_STEP;
+                    }
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        delta.1 -= CURVE_KEYBOARD_STEP;
+                    }
+                });
+                if delta != (0.0, 0.0) {
+                    if curve.move_point(i, x + delta.0, y + delta.1) {
+                        response.mark_changed();
+                    }
+                    // Arrow keys are also egui's spatial focus navigation;
+                    // the edit owns the key, so focus must stay on this point.
+                    point_response.request_focus();
+                    ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+                }
+                if !self.fixed_count {
+                    let delete = ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                            || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+                    });
+                    if delete && curve.remove(i).is_ok() {
+                        response.mark_changed();
+                        focused_point = None;
+                        break;
+                    }
                 }
             }
         }
 
-        // Hover clipboard, consumed so a later panel does not see it.
-        if response.hovered() && !ui.ctx().text_edit_focused() {
+        // Hover or keyboard-focus clipboard, consumed so a later panel does
+        // not see it.
+        if (response.hovered() || focused_point.is_some() || hot_point.is_some())
+            && !ui.ctx().text_edit_focused()
+        {
             let (copy, paste) = ui.input_mut(|i| {
                 let (mut copy, mut paste) = (false, None);
                 i.events.retain(|e| match e {
@@ -398,12 +442,20 @@ impl<'a> CurveEdit<'a> {
             painter.rect_stroke(rect, 2.0, grid, StrokeKind::Inside);
             let line: Vec<Pos2> = curve.points().iter().map(|&p| to_screen(rect, p)).collect();
             painter.add(Shape::line(line, Stroke::new(1.5, theme::accent())));
-            let hover = response.hover_pos();
-            for &p in curve.points() {
+            for (i, &p) in curve.points().iter().enumerate() {
                 let centre = to_screen(rect, p);
-                let hot = hover.is_some_and(|h| h.distance(centre) <= HANDLE_RADIUS);
-                let fill = if hot { theme::accent() } else { Color32::WHITE };
-                painter.circle(centre, 3.5, fill, Stroke::new(1.0, theme::app_bg()));
+                let hot = hot_point == Some(i);
+                let fill = if hot {
+                    theme::accent()
+                } else {
+                    theme::graphic_fg()
+                };
+                let stroke = if focused_point == Some(i) {
+                    theme::focus_ring_stroke()
+                } else {
+                    Stroke::new(1.0, theme::app_bg())
+                };
+                painter.circle(centre, 3.5, fill, stroke);
             }
         }
         // wave-a11y-first-pass: painter-drawn and focusable.
@@ -590,10 +642,22 @@ mod tests {
         assert!(changed);
         assert_eq!(c.points().len(), 3);
         assert!((c.points()[1].0 - 0.25).abs() < 0.02 && (c.points()[1].1 - 0.75).abs() < 0.02);
-        // The same click in fixed-count mode adds nothing.
+        // The same click in fixed-count mode adds nothing. Use a separate
+        // context so the main curve's handle rects stay steady-state.
+        let fixed_ctx = egui::Context::default();
         let mut fixed = Curve::default();
-        frame(&ctx, &mut fixed, true, vec![button(at, primary, true)]);
-        frame(&ctx, &mut fixed, true, vec![button(at, primary, false)]);
+        frame(
+            &fixed_ctx,
+            &mut fixed,
+            true,
+            vec![button(at, primary, true)],
+        );
+        frame(
+            &fixed_ctx,
+            &mut fixed,
+            true,
+            vec![button(at, primary, false)],
+        );
         assert_eq!(fixed.points().len(), 2);
         // Right-click on the new handle removes it.
         let secondary = egui::PointerButton::Secondary;
@@ -609,6 +673,32 @@ mod tests {
         );
         frame(&ctx, &mut c, false, vec![button(handle, secondary, false)]);
         assert_eq!(c, Curve::default());
+    }
+
+    #[test]
+    fn headless_drag_moves_a_handle_in_steady_state() {
+        let ctx = egui::Context::default();
+        let mut c = three();
+        let (_, rect) = frame(&ctx, &mut c, false, Vec::new());
+        let start = to_screen(rect, c.points()[1]);
+        let target = to_screen(rect, (0.7, 0.4));
+        let primary = egui::PointerButton::Primary;
+        frame(
+            &ctx,
+            &mut c,
+            false,
+            vec![
+                egui::Event::PointerMoved(start),
+                button(start, primary, true),
+            ],
+        );
+        frame(&ctx, &mut c, false, vec![egui::Event::PointerMoved(target)]);
+        frame(&ctx, &mut c, false, vec![button(target, primary, false)]);
+        assert!(
+            (c.points()[1].0 - 0.7).abs() < 0.02 && (c.points()[1].1 - 0.4).abs() < 0.02,
+            "steady-state drag did not move the handle: {:?}",
+            c.points()[1]
+        );
     }
 
     #[test]
@@ -633,6 +723,78 @@ mod tests {
         // A junk paste changes nothing.
         frame(&ctx, &mut c, false, vec![egui::Event::Paste("junk".into())]);
         assert_eq!(c, three());
+    }
+
+    #[test]
+    fn tab_reaches_a_named_point_and_arrows_edit_it() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let curve = std::rc::Rc::new(std::cell::RefCell::new(three()));
+        let widget_curve = std::rc::Rc::clone(&curve);
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            CurveEdit::new(&mut widget_curve.borrow_mut())
+                .size(120.0)
+                .show(ui);
+        });
+        harness.run();
+        let mut reached = false;
+        for _ in 0..8 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            reached = harness
+                .query_all_by(|node| {
+                    node.is_focused() && node.label().as_deref() == Some("curve point 2")
+                })
+                .next()
+                .is_some();
+            if reached {
+                break;
+            }
+        }
+        assert!(reached, "Tab never reached the named second point");
+        let before = curve.borrow().points()[1];
+        harness.key_press(egui::Key::ArrowUp);
+        harness.run();
+        assert!(
+            curve.borrow().points()[1].1 > before.1,
+            "ArrowUp did not edit the curve"
+        );
+        let before_x = curve.borrow().points()[1].0;
+        harness.key_press(egui::Key::ArrowRight);
+        harness.run();
+        assert!(curve.borrow().points()[1].0 > before_x);
+
+        let focused_before_delete = harness
+            .query_all_by(|node| {
+                node.is_focused() && node.label().as_deref() == Some("curve point 2")
+            })
+            .next()
+            .is_some();
+        let focused_now: Vec<_> = harness
+            .query_all_by(|node| node.is_focused())
+            .map(|node| node.accesskit_node().label())
+            .collect();
+        assert!(
+            focused_before_delete,
+            "focus was lost before Delete; focused now: {focused_now:?}"
+        );
+        harness.key_press(egui::Key::Delete);
+        harness.run();
+        assert_eq!(curve.borrow().points().len(), 2, "interior Delete removes");
+        let endpoints = curve.borrow().clone();
+        harness.key_press(egui::Key::Delete);
+        harness.run();
+        assert_eq!(*curve.borrow(), endpoints, "endpoint Delete is protected");
+    }
+
+    #[test]
+    fn graphic_foreground_clears_the_all_theme_contrast_gate() {
+        for theme in crate::theme::Theme::ALL {
+            let tokens = theme.tokens();
+            assert!(
+                crate::theme::contrast_ratio(tokens.text, tokens.raised) >= 3.0,
+                "{theme:?}: graphic foreground on raised is below 3:1"
+            );
+        }
     }
 
     #[test]

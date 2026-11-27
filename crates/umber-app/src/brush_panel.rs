@@ -107,6 +107,8 @@ const CURVE_HANDLE_HIT_SIZE: f32 = 14.0;
 /// Minimum x gap between adjacent control points: the strict-monotonicity
 /// invariant of [`ControlCurve`] in curve-editor units.
 const CURVE_MIN_GAP: f32 = 0.01;
+/// Keyboard adjustment per arrow press in normalized curve space.
+const CURVE_KEYBOARD_STEP: f32 = 0.01;
 /// Minor-gridline divisions, each direction (§2: "4x4 minor").
 const CURVE_GRID_DIVS: u32 = 4;
 /// Samples drawn per segment for the cosmetic display spline
@@ -2099,7 +2101,7 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     // (the per-point handles draw on top with their own ids — the
     // reader already sees them as interactables).
     canvas_response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "curve editor"));
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "curve"));
     let base_id = canvas_response.id;
 
     let to_screen = |p: (f32, f32)| {
@@ -2141,11 +2143,63 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     let mut displayed = curve.points;
     let mut dragged_idx = None;
     let mut point_state = [(false, false); 4]; // (dragged, hovered), for fill color below
+    let mut focused_idx = None;
     for i in 0..4 {
         let point_id = base_id.with(("curve-point", i));
         let center = to_screen(curve.points[i]);
         let grab = egui::Rect::from_center_size(center, egui::Vec2::splat(CURVE_HANDLE_HIT_SIZE));
         let response = ui.interact(grab, point_id, egui::Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Slider,
+                true,
+                format!("curve point {}", i + 1),
+            )
+        });
+
+        if response.has_focus() && !ui.ctx().text_edit_focused() {
+            let (mut x, mut y) = curve.points[i];
+            let mut delta = (0.0, 0.0);
+            ui.input_mut(|input| {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                    delta.0 -= CURVE_KEYBOARD_STEP;
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                    delta.0 += CURVE_KEYBOARD_STEP;
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    delta.1 += CURVE_KEYBOARD_STEP;
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    delta.1 -= CURVE_KEYBOARD_STEP;
+                }
+            });
+            if delta != (0.0, 0.0) {
+                x += delta.0;
+                y += delta.1;
+                let (x, y) = clamp_control_point(&curve.points, i, x, y);
+                if (x, y) != curve.points[i] {
+                    curve.points[i] = (x, y);
+                    changed = true;
+                }
+                // Arrow keys also drive egui's spatial focus navigation;
+                // the edit owns the key, so focus stays on this handle.
+                response.request_focus();
+                ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+            }
+            let delete = ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            });
+            if delete {
+                if let Some(new_points) = delete_point(curve.points, i) {
+                    if new_points != curve.points {
+                        curve.points = new_points;
+                        changed = true;
+                    }
+                }
+            }
+        }
 
         if response.dragged() {
             dragged_idx = Some(i);
@@ -2177,6 +2231,9 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
             }
         }
         point_state[i] = (response.dragged(), response.hovered());
+        if response.has_focus() {
+            focused_idx = Some(i);
+        }
 
         // Reduce Motion (the style's animation_time = 0) snaps the
         // tween too (U4 audit): the min keeps the curve's own pace.
@@ -2238,6 +2295,13 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
             CURVE_HANDLE_RADIUS,
             egui::Stroke::new(1.5, curve_palette::POINT_STROKE),
         );
+        if focused_idx == Some(i) {
+            painter.circle_stroke(
+                anim_center,
+                CURVE_HANDLE_RADIUS + 2.0,
+                umber_gui::theme::focus_ring_stroke(),
+            );
+        }
     }
 
     // The in/out readout: the dragged point's exact x while dragging,
@@ -2289,6 +2353,8 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
         }
     });
 
+    // Paint the canvas focus ring last so the opaque plot cannot cover it.
+    umber_gui::theme::paint_focus_ring(ui, &canvas_response);
     changed
 }
 
@@ -2405,6 +2471,85 @@ mod row_label_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn legacy_curve_point_receives_focus_and_arrow_edits() {
+        use egui_kittest::kittest::Queryable;
+        let curve = std::rc::Rc::new(std::cell::RefCell::new(
+            ControlCurve::try_new(&[(0.0, 0.0), (1.0 / 3.0, 0.9), (2.0 / 3.0, 0.1), (1.0, 1.0)])
+                .expect("non-identity legacy test curve"),
+        ));
+        let widget_curve = std::rc::Rc::clone(&curve);
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            curve_editor(ui, &mut widget_curve.borrow_mut());
+        });
+        harness.run();
+        let mut reached = false;
+        for _ in 0..10 {
+            harness.key_press(egui::Key::Tab);
+            harness.run();
+            reached = harness
+                .query_all_by(|node| {
+                    node.is_focused() && node.label().as_deref() == Some("curve point 2")
+                })
+                .next()
+                .is_some();
+            if reached {
+                break;
+            }
+        }
+        assert!(reached, "Tab never reached the legacy second point");
+        let before = curve.borrow().points[1];
+        harness.key_press(egui::Key::ArrowUp);
+        harness.run();
+        assert!(
+            curve.borrow().points[1].1 > before.1,
+            "ArrowUp did not edit the legacy curve"
+        );
+        let before_x = curve.borrow().points[1].0;
+        harness.key_press(egui::Key::ArrowRight);
+        harness.run();
+        assert!(curve.borrow().points[1].0 > before_x);
+
+        let before_delete = curve.borrow().points;
+        harness.key_press(egui::Key::Delete);
+        harness.run();
+        assert_eq!(curve.borrow().points.len(), 4);
+        let point = curve.borrow().points[1];
+        let (left, right) = (before_delete[0], before_delete[2]);
+        let expected_y = left.1 + (right.1 - left.1) * (point.0 - left.0) / (right.0 - left.0);
+        assert!(
+            (point.1 - expected_y).abs() < 1e-5,
+            "Delete must collinearize onto the edited chord: {point:?} vs {expected_y}"
+        );
+        assert!(
+            (before_delete[1].1 - expected_y).abs() > 1e-3,
+            "the fixture must make Delete a real change"
+        );
+        let before_endpoint_delete = curve.borrow().points;
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        harness.run();
+        harness.key_press(egui::Key::Delete);
+        harness.run();
+        assert_eq!(curve.borrow().points, before_endpoint_delete);
+    }
+
+    #[test]
+    fn legacy_canvas_focus_ring_is_painted_after_plot() {
+        let src = include_str!("brush_panel.rs");
+        let plot = src
+            .find("painter.rect_filled(rect, 0.0, curve_palette::BG)")
+            .expect("plot fill");
+        let presets = src.find("brush.curve-presets").expect("presets row");
+        let ring = src
+            .find("paint_focus_ring(ui, &canvas_response)")
+            .expect("canvas focus ring");
+        assert!(plot < ring, "the plot must not cover the focus ring");
+        assert!(
+            presets < ring,
+            "the focus ring must be the last widget paint"
+        );
+    }
 
     #[test]
     fn stamp_coverage_is_luma_times_alpha() {
