@@ -1174,7 +1174,15 @@ mod tests {
         let mut reader = BufReader::new(new_client);
         let mut line = String::new();
         let error = reader.read_line(&mut line).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        // Unix reports WouldBlock; Windows reports TimedOut for the same
+        // read-timeout expiry. Both prove the newer client stayed open.
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "the newer client must time out, not reach EOF: {error}"
+        );
 
         let current_owner = Arc::new(Mutex::new(None));
         assert!(bridge_cleanup(&state, &current_owner, 2).is_none());
