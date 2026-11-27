@@ -48,14 +48,21 @@ AppDir/
   stages it.
 - **linuxdeploy + appimagetool path (not hand-rolled `ldd` bundling).**
   linuxdeploy resolves the shared-library closure without packing. The
-  versioned appimagetool **1.9.1** binary performs the pack step explicitly
+  release asset tagged appimagetool **1.9.1** performs the pack step explicitly
   (`https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage`),
-  so its embedded-tool bypass cannot recur. linuxdeploy and its type2
-  runtime remain rolling **continuous**: that is the accepted policy, not a
-  claimed full toolchain pin. CI checks the appimagetool version and fails
-  on every `::error::` diagnostic.
+  so its embedded-tool bypass cannot recur. That binary reports `git version
+  8c8c91f`, build `296`; CI verifies SHA-256
+  `ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0`
+  before executing it, then asserts that reported identity after packing.
+  linuxdeploy and its type2 runtime remain rolling **continuous**: that is the
+  accepted policy, reviewed 2026-11-27, not a claimed full toolchain pin.
+  linuxdeploy failures propagate through its exit status; appimagetool's log
+  fails CI on every `::error::` diagnostic.
 - **Built on ubuntu-22.04.** The oldest CI image = the lowest glibc floor
-  (2.35), so the AppImage runs on newer distros. Building on
+  (2.35), so the AppImage runs on newer distros. GitHub has scheduled its
+  final retirement for 2027-04-17 (brownouts begin 2027-03-23); migrate the
+  build image before then or replace it with an equally old glibc baseline.
+  Building on
   ubuntu-latest would silently raise the floor — do not "upgrade" the
   runner without recording the new floor here.
 - **The Vulkan loader is NEVER bundled.** Same rule as the installers
@@ -90,13 +97,22 @@ FUSE-less fallback). wasmtime/Cranelift is statically linked — no runtime
 ## Build locally (human run — the claw cannot)
 
 ```sh
+sudo apt-get update && sudo apt-get install -y --no-install-recommends librsvg2-bin
 cargo --locked build --release -p umber-app
 # stage the tree above into AppDir/, then:
 rsvg-convert -w 256 -h 256 appimage/umber.svg > AppDir/umber.png
 ln -s umber.png AppDir/.DirIcon
+curl -LsSf -o linuxdeploy-x86_64.AppImage \
+  https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+curl -LsSf -o appimagetool.AppImage \
+  https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+printf '%s  %s\n' \
+  ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0 \
+  appimagetool.AppImage | sha256sum -c -
+chmod +x linuxdeploy-x86_64.AppImage appimagetool.AppImage
 ./linuxdeploy-x86_64.AppImage --appdir AppDir \
   --executable target/release/umber \
   --desktop-file appimage/org.umber.Umber.desktop \
   --icon-file appimage/umber.svg
-./appimagetool-x86_64.AppImage AppDir Umber-x86_64.AppImage
+./appimagetool.AppImage AppDir Umber-x86_64.AppImage
 ```

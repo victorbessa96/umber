@@ -12,12 +12,21 @@ jobs:
   build:
     name: build AppImage (x86_64)
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      APPIMAGETOOL_GIT_VERSION: '8c8c91f'
+      APPIMAGETOOL_BUILD: '296'
+      APPIMAGETOOL_BUILD_ON: '2025-12-04 17:55:56 UTC'
+      APPIMAGETOOL_SHA256: 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0'
+      APPIMAGETOOL_URL: 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage'
+      LINUXDEPLOY_URL: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
       - name: Build the staged binary
         run: cargo --locked build --release -p umber-app
       - name: Stage the AppDir tree
@@ -41,18 +50,13 @@ jobs:
           test -s AppDir/umber.png
           test -L AppDir/.DirIcon
       - name: Fetch packaging tools
-        env:
-          APPIMAGETOOL_VERSION: '1.9.1'
-          APPIMAGETOOL_URL: 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage'
-          LINUXDEPLOY_URL: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
         run: |
           set -eu
           curl -LsSf -o linuxdeploy.AppImage "${LINUXDEPLOY_URL}"
           curl -LsSf -o appimagetool.AppImage "${APPIMAGETOOL_URL}"
+          printf '%s  %s\n' "${APPIMAGETOOL_SHA256}" appimagetool.AppImage | sha256sum -c -
           chmod +x linuxdeploy.AppImage appimagetool.AppImage
       - name: Bundle deps + pack the AppImage
-        env:
-          APPIMAGETOOL_VERSION: '1.9.1'
         run: |
           set -euo pipefail
           ./linuxdeploy.AppImage --appdir AppDir \
@@ -60,11 +64,14 @@ jobs:
             --desktop-file AppDir/usr/share/applications/org.umber.Umber.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg
           ./appimagetool.AppImage AppDir Umber-x86_64.AppImage 2>&1 | tee appimagetool.log
-          if grep -q '^::error::' appimagetool.log; then
+          if grep -q '::error::' appimagetool.log; then
             echo 'appimagetool reported a packaging error'
             exit 1
           fi
-          ./appimagetool.AppImage --version | grep -F "${APPIMAGETOOL_VERSION}"
+          version_output="$(./appimagetool.AppImage --version)"
+          expected="appimagetool, continuous build (git version ${APPIMAGETOOL_GIT_VERSION}), build ${APPIMAGETOOL_BUILD} built on ${APPIMAGETOOL_BUILD_ON}"
+          printf '%s\n' "${version_output}"
+          test "${version_output}" = "${expected}"
       - name: Assert the Vulkan loader was NOT bundled
         run: |
           set -eu
@@ -81,7 +88,7 @@ jobs:
           cmp squashfs-root/usr/bin/umber AppDir/usr/bin/umber
           rm -rf squashfs-root
       - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Umber-x86_64-AppImage
           path: 'Umber-*.AppImage'
