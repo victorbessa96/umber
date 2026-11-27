@@ -13,7 +13,7 @@ The Windows step now uses `--test-threads=1`. A `workflow_dispatch` `test_filter
 ## Verification
 
 - PyYAML and static assertions: filter wiring, serialization, and all four skips present; Linux command unchanged. The filter is passed as the quoted `TEST_FILTER` environment variable, closing the review's shell-hardening note; `cargo test -p umber-gui "" -- --list` listed the full suite, confirming empty-filter behavior.
-- Filtered mapped-ray dispatch: pending push.
+- Filtered run `45990982180` proved PowerShell expanded `${TEST_FILTER}` to `""`, so the full suite ran and stalled at `d3_d5_maps_execute_through_app_worker`. The command now uses `${env:TEST_FILTER}`; the exact mapped-ray diagnostic must be rerun before any root-cause claim.
 - Occluder dispatch (if needed): pending.
 - Independent review `deleg_d8c14a1a`: **SHIP**. Empty filter preserves the full release gate; Linux retains parallel coverage. Informational shell-hardening and parallelism-masking notes are not gating defects.
 - Commit/push/current-tip CI: not yet claimed.
