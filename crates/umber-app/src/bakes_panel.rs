@@ -5177,6 +5177,119 @@ mod tests {
         }
     }
 
+    fn d3d5_flat_quad() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        }
+    }
+
+    fn d3d5_ground_params() -> umber_bake::ground_plane::GroundPlaneParams {
+        umber_bake::ground_plane::GroundPlaneParams {
+            desc: umber_mesh::GroundPlaneDesc {
+                size: 10.0,
+                height_offset: 0.1,
+                subdivisions: 32,
+            },
+            maps_bitmask: 1,
+            rays: 16,
+            max_distance: 100.0,
+            bias: 0.001,
+        }
+    }
+
+    fn d3d5_special() -> SpecialBakeParams {
+        SpecialBakeParams {
+            ground_plane: d3d5_ground_params(),
+            opacity: umber_bake::opacity::OpacityParams {
+                source: umber_bake::opacity::OpacitySource::Manual,
+                strength: 1.0,
+                invert: false,
+                ..umber_bake::opacity::OpacityParams::new()
+            },
+            id_multi: umber_bake::IdMultiParams {
+                sources: vec![IdSourceParams {
+                    source: IdSource::IdMap,
+                    weight: 1.0,
+                    mask_path: None,
+                    color: [255, 255, 255],
+                }],
+                blend_mode: IdBlendMode::Replace,
+                width: 64,
+                height: 64,
+            },
+            tiled: false,
+        }
+    }
+
+    fn run_d3d5_single(selection: BakeSelection, special: SpecialBakeParams) -> Vec<BakeRecord> {
+        let gpu = try_request_gpu().expect("real GPU adapter required for D3-D5 worker isolation");
+        let out = std::env::temp_dir().join(format!(
+            "umber-d3d5-single-{selection:?}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let path = out.join("map.png");
+        let records = run_bake(BakeRequest {
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            mesh: d3d5_flat_quad(),
+            size: 64,
+            rays: 16,
+            occluder_own_set: false,
+            dilation_iterations: 0,
+            margin: MarginType::Extend,
+            skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            jobs: vec![(
+                BakeJob {
+                    selection,
+                    tile: FIRST_TILE,
+                    source: BakeSource::WholeMesh,
+                },
+                path,
+                "Quad".to_string(),
+                None,
+            )],
+            skew_jobs: Vec::new(),
+            transfer: None,
+            special,
+        })
+        .expect("single D3-D5 worker branch must execute");
+        assert_eq!(records.len(), 1, "one selected output");
+        let (_w, _h, decoded) = umber_export::png::read_png_rgba8(&records[0].path)
+            .expect("the worker output must decode");
+        assert!(!decoded.is_empty(), "decoded output must not be empty");
+        let _ = std::fs::remove_dir_all(out);
+        records
+    }
+
+    #[test]
+    fn worker_ground_plane_only_smoke() {
+        run_d3d5_single(BakeSelection::GroundPlane, d3d5_special());
+    }
+
+    #[test]
+    fn worker_opacity_only_smoke() {
+        let mut special = d3d5_special();
+        special.opacity.strength = 0.25;
+        run_d3d5_single(BakeSelection::Opacity, special);
+    }
+
+    #[test]
+    fn worker_id_multi_only_smoke() {
+        run_d3d5_single(BakeSelection::IdMulti, d3d5_special());
+    }
+
     #[test]
     fn d3_d5_maps_execute_through_app_worker() {
         let gpu = try_request_gpu().expect("real GPU adapter required for D3-D5 worker coverage");
