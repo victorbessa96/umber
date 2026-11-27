@@ -331,6 +331,7 @@ bakes =
     .id-source-material = Material
     .id-source-id-map = ID map
     .id-source-manual = Manual
+    .id-source-remove = Remove ID source
     .id-source-weight = Weight
     .id-source-mask = Mask
     .id-blend-mode = Blend mode
@@ -662,6 +663,8 @@ brush =
 
 layers =
     .duplicate = Duplicate layer
+    .move-up = Move layer up
+    .move-down = Move layer down
     .set-header = Texture set: { $set }
     .add-paint = + Paint layer
     .add-menu = + ▼

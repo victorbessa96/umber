@@ -510,13 +510,20 @@ pub fn home_card(
                         ui.close();
                     }
                 });
-                if hovered
-                    && ui
+                if hovered {
+                    let remove = ui
                         .place(remove_rect, Button::new("×").frame(false))
-                        .on_hover_text(tr("home.recent-remove"))
-                        .clicked()
-                {
-                    edit = Some(RecentEdit::Remove(path.clone()));
+                        .on_hover_text(tr("home.recent-remove"));
+                    remove.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            tr("home.recent-remove"),
+                        )
+                    });
+                    if remove.clicked() {
+                        edit = Some(RecentEdit::Remove(path.clone()));
+                    }
                 }
             }
 

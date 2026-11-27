@@ -720,9 +720,7 @@ pub fn library_ui(
             let mut apply: Option<String> = None;
             for s in &state.saved {
                 ui.horizontal(|ui| {
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text(tr("assets.saved-delete-tip"))
+                    if umber_gui::widgets::glyph_button(ui, "✕", &tr("assets.saved-delete-tip"))
                         .clicked()
                     {
                         remove = Some(s.name.clone());
@@ -892,7 +890,7 @@ pub fn library_ui(
     let refresh = ui
         .horizontal(|ui| {
             ui.strong(tr("assets.materials"));
-            ui.small_button("↻").on_hover_text(tr("assets.refresh"))
+            umber_gui::widgets::glyph_button(ui, "↻", &tr("assets.refresh"))
         })
         .inner
         .clicked();
@@ -1793,7 +1791,7 @@ mod kittest {
         assert!(h.run_ok().is_some());
         assert_eq!(h.state().panel.search, "worn", "apply restores the query");
         // Delete removes the row and persists the empty list.
-        h.get_by_label("✕").click();
+        h.get_by_label(&tr("assets.saved-delete-tip")).click();
         assert!(h.run_ok().is_some());
         assert!(h.state().panel.saved.is_empty());
         let on_disk: Vec<SavedSearch> =

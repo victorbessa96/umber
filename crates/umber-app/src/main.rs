@@ -3729,11 +3729,13 @@ fn texture_sets_panel_ui(
             // The eye per set (g2-texture-set-list's open tail): hides
             // the set's tiles from the composite without switching.
             let hidden = paint.set_hidden(name);
-            if ui
+            let visibility = ui
                 .selectable_label(!hidden, if hidden { "·" } else { "👁" })
-                .on_hover_text(tr("texturesets.toggle-visible"))
-                .clicked()
-            {
+                .on_hover_text(tr("texturesets.toggle-visible"));
+            visibility.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "visibility")
+            });
+            if visibility.clicked() {
                 paint.set_set_hidden(name, !hidden);
             }
             ui.selectable_value(

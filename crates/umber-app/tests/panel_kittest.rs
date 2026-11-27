@@ -329,10 +329,10 @@ fn the_duplicate_button_copies_the_layer_row() {
     );
     support::settle(&mut harness);
     assert_eq!(harness.state().layers().len(), 1);
-    // The glyph button's accessible label is its text (the duplicate
-    // row deliberately carries no tooltip: its catalog key waits on
-    // the stencil wave's i18n lock — see document.rs's row comment).
-    harness.get_by_label("⊕").click();
+    // The glyph button's accessible label is the localized action name.
+    harness
+        .get_by_label(&umber_app::i18n::tr("layers.duplicate"))
+        .click();
     support::settle(&mut harness);
     let doc = harness.state();
     assert_eq!(doc.layers().len(), 2, "the duplicate landed");

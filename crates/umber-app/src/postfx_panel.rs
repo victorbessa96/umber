@@ -554,8 +554,7 @@ fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: 
                         .add(egui::Label::new("☰").sense(egui::Sense::drag()))
                         .on_hover_text(i18n::tr("postfx.drag-hint"));
                     // g7-accesskit-sweep (the painter-drawn half): the
-                    // glyph handle names its action (English-only at the
-                    // widget layer; the localized hint is the tooltip).
+                    // glyph handle's localized hint is its accessible name.
                     handle.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -578,23 +577,33 @@ fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: 
                     if ui.checkbox(&mut on, label).changed() {
                         changed |= chain.set_enabled(i, on);
                     }
-                    if ui
+                    let move_up = ui
                         .add_enabled(i > 0, egui::Button::new("▲"))
-                        .on_hover_text(i18n::tr("postfx.move-up"))
-                        .clicked()
-                    {
+                        .on_hover_text(i18n::tr("postfx.move-up"));
+                    move_up.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            i > 0,
+                            i18n::tr("postfx.move-up"),
+                        )
+                    });
+                    if move_up.clicked() {
                         edit = Some(RowEdit::Move { from: i, to: i - 1 });
                     }
-                    if ui
+                    let move_down = ui
                         .add_enabled(i + 1 < n, egui::Button::new("▼"))
-                        .on_hover_text(i18n::tr("postfx.move-down"))
-                        .clicked()
-                    {
+                        .on_hover_text(i18n::tr("postfx.move-down"));
+                    move_down.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            i + 1 < n,
+                            i18n::tr("postfx.move-down"),
+                        )
+                    });
+                    if move_down.clicked() {
                         edit = Some(RowEdit::Move { from: i, to: i + 1 });
                     }
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text(i18n::tr("postfx.remove"))
+                    if umber_gui::widgets::glyph_button(ui, "✕", &i18n::tr("postfx.remove"))
                         .clicked()
                     {
                         edit = Some(RowEdit::Remove(i));
@@ -674,6 +683,38 @@ fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_buttons_expose_enabled_names_and_reorder() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let mut chain = PostChain::new();
+        chain.push(PostEffect::default_for(PostPass::Sharpen));
+        chain.push(PostEffect::default_for(PostPass::Bloom));
+        let panel = PostFxPanel::default();
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, (chain, panel)| {
+                show(ui, chain, panel, ViewMode::Lit);
+            },
+            (chain, panel),
+        );
+        harness.run();
+        let move_up = i18n::tr("postfx.move-up");
+        let ups: Vec<_> = harness.query_all_by_label(&move_up).collect();
+        assert_eq!(ups.len(), 2);
+        assert!(ups[0].accesskit_node().is_disabled());
+        assert!(!ups[1].accesskit_node().is_disabled());
+        let move_down = i18n::tr("postfx.move-down");
+        let downs: Vec<_> = harness.query_all_by_label(&move_down).collect();
+        assert_eq!(downs.len(), 2);
+        assert!(!downs[0].accesskit_node().is_disabled());
+        assert!(downs[1].accesskit_node().is_disabled());
+
+        ups[1].click();
+        harness.run();
+        assert_eq!(harness.state().0.effects[0].pass(), PostPass::Bloom);
+        assert_eq!(harness.state().0.effects[1].pass(), PostPass::Sharpen);
+    }
 
     #[test]
     fn drop_index_lands_where_the_pointer_is() {

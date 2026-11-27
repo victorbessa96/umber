@@ -2825,7 +2825,15 @@ impl BakesPanel {
                                         }
                                     }
                                     // Remove button
-                                    if ui.button("✕").clicked() {
+                                    let remove = ui.button("✕");
+                                    remove.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            tr("bakes.id-source-remove"),
+                                        )
+                                    });
+                                    if remove.clicked() {
                                         remove_idx = Some(idx);
                                     }
                                 });

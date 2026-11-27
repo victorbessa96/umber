@@ -1025,26 +1025,22 @@ pub fn layers_ui(
                     // properties, added through the undoable commands.
                     // `⊕` is in Inter (the old `⧉` was in no bundled font
                     // and drew tofu; UI/UX pass U1-4).
-                    if ui
-                        .small_button(DUPLICATE_GLYPH)
-                        .on_hover_text(tr("layers.duplicate"))
-                        .clicked()
+                    if umber_gui::widgets::glyph_button(
+                        ui,
+                        DUPLICATE_GLYPH,
+                        &tr("layers.duplicate"),
+                    )
+                    .clicked()
                     {
                         duplicate_id = Some(layer.id);
                     }
                     // Move: the panel lists top-first, so "up" raises the
                     // stack index.
-                    if ui
-                        .small_button("▼")
-                        .on_hover_text(tr("history.op-reorder"))
-                        .clicked()
+                    if umber_gui::widgets::glyph_button(ui, "▼", &tr("layers.move-down")).clicked()
                     {
                         move_by = Some((layer.id, -1));
                     }
-                    if ui
-                        .small_button("▲")
-                        .on_hover_text(tr("history.op-reorder"))
-                        .clicked()
+                    if umber_gui::widgets::glyph_button(ui, "▲", &tr("layers.move-up")).clicked()
                     {
                         move_by = Some((layer.id, 1));
                     }
@@ -1734,10 +1730,7 @@ pub fn smart_shelf_ui(
     // list in egui memory per frame-group, refreshed by the user.
     let cache_id = egui::Id::new("smart-shelf-cache");
     let mut names: Option<Vec<String>> = ui.ctx().data(|d| d.get_temp(cache_id));
-    let refresh = ui
-        .small_button("↻")
-        .on_hover_text(tr("assets.refresh"))
-        .clicked();
+    let refresh = umber_gui::widgets::glyph_button(ui, "↻", &tr("assets.refresh")).clicked();
     if names.is_none() || refresh {
         let list: Vec<String> = list_smart_materials(&smart_dirs())
             .into_iter()
@@ -2160,7 +2153,15 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
                             }));
                         }
                         let label = if row.mask_enabled { "◐" } else { "○" };
-                        if ui.selectable_label(row.mask_enabled, label).clicked() {
+                        let toggle = ui.selectable_label(row.mask_enabled, label);
+                        toggle.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                tr("history.op-set-mask-enabled"),
+                            )
+                        });
+                        if toggle.clicked() {
                             actions.push(MaskAction::Toggle(row.id, !row.mask_enabled));
                         }
                         ui.label(
@@ -2463,8 +2464,9 @@ mod tests {
         ));
         assert_eq!(harness.state().doc.history.len(), before + 1);
         // The rows list top-first, so the LAST ▲ belongs to "Bottom".
-        let raises: Vec<_> = harness.query_all_by_label("▲").collect();
-        assert_eq!(raises.len(), 3, "one ▲ per row");
+        let move_up_label = tr("layers.move-up");
+        let raises: Vec<_> = harness.query_all_by_label(&move_up_label).collect();
+        assert_eq!(raises.len(), 3, "one move-up action per row");
         raises.last().unwrap().click();
         harness.run();
         let names: Vec<String> = harness
