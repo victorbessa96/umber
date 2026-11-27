@@ -160,8 +160,8 @@
 //!   ([`Self::texels_per_uv_for_channel`] — the L2 kill) and the brush
 //!   ring reads the same fn, so a smaller channel lands channel-scale
 //!   dabs and the ring agrees; the four same-class arms (symmetry
-//!   snapshot, clone offset, fill raster, seam mirror radius) stay
-//!   set-scale as the named L2b follow-up. The
+//!   snapshot, clone offset, fill raster, seam mirror radius) also read
+//!   the painted channel's density after L2b. The
 //!   quick mask stays per-SET (it gates baseColor's thread only) and
 //!   layer-mask planes stay set-sized: neither follows a channel resize.
 //!   Deferred beside the sizing: 8K-per-channel VRAM guidance (the set
@@ -190,9 +190,10 @@
 //!   `umber-brush`'s `QuickMask` (single-size) is untouched — one instance
 //!   per set at the set's size. [`Self::quick_mask`] returns the ACTIVE
 //!   set's mask (every existing caller stays source-compatible).
-//! * Per-tile sites (routing, seam radius, clone offset, fill replay)
-//!   use [`Self::texels_per_uv_for`]; the dab conversion and the brush
-//!   ring use the per-channel form above. The symmetry
+//! * Per-tile production sites (routing, seam radius, clone offset, fill
+//!   replay) use the per-channel form above; the legacy set-scale helper
+//!   [`Self::texels_per_uv_for`] remains for compatibility and tests.
+//!   The dab conversion and brush ring share that channel form. The symmetry
 //!   snapshot is taken at the stroke-START tile's density: a stroke
 //!   crossing into a different-sized tile applies the start tile's
 //!   transforms there (slightly off-center siblings — named follow-up).
@@ -518,8 +519,9 @@ pub enum IdSelectError {
 /// ([`PaintState::bake_and_select_id`]): each entry holds the bytes plus
 /// the content key, tile and frame that produced them.
 ///
-/// Judgment call (L3b, revising the one-entry original) — a small FIFO
-/// ring, no LRU: the artist re-clicks one tile far more often than they
+/// Judgment call (L3b, revising the one-entry original) — a bounded
+/// recency ring: hits promote to the back, misses at cap evict index 0.
+/// The artist re-clicks one tile far more often than they
 /// alternate, but a two-tile mesh alternating A↔B re-baked EVERY click —
 /// the thrash the one-entry judgment accepted. Three entries kill the
 /// A↔B thrash and hold one spare at the resident cost of ~3× the bytes
@@ -1450,12 +1452,12 @@ pub struct PaintState {
     /// clear, resize); a gated dab's plane is brought back in sync before
     /// it is staged.
     mask_synced: BTreeSet<(PlaneOwner, u16, String)>,
-    /// Single-entry cache of the last click-time ID bake
+    /// Three-entry cache of recent click-time ID bakes
     /// ([`Self::bake_and_select_id`]): re-clicking the same mesh at the
     /// same tile and size reuses the bytes instead of running the GPU
-    /// bake again. `None` until the first click; replaced on every miss
-    /// and left untouched on any error path. See [`CachedIdBake`] for the
-    /// one-entry judgment call.
+    /// bake again. A hit promotes that entry to the back; a miss at cap
+    /// evicts index 0, so this is bounded recency, not strict FIFO.
+    /// Errors leave the cache untouched.
     id_bake_cache: Vec<CachedIdBake>,
     /// The live stroke paints the mask (mask mode at `begin_stroke`).
     stroke_mask_edit: bool,
@@ -1923,13 +1925,11 @@ impl PaintState {
     /// The UV→texel density of `tile`'s set (the per-tile form of
     /// `texels_per_uv`, which tracks the active set).
     ///
-    /// Set-scale BY DESIGN for the quick mask and the four same-class
-    /// arms named in the L2 kill report (the symmetry snapshot, the
-    /// clone offset, the fill raster, the seam mirror radius — the
-    /// L2b follow-up); the DAB SPACING and the brush ring read
-    /// [`Self::texels_per_uv_for_channel`] instead, so they track the
-    /// painted channel's own density and can never disagree with it
-    /// under a channel override.
+    /// Legacy set-scale UV→texel helper, retained for compatibility and
+    /// tests. The four same-class L2b arms, DAB SPACING, and the brush
+    /// ring read [`Self::texels_per_uv_for_channel`] instead, so painted
+    /// work tracks the channel override. Quick-mask rasterization uses
+    /// the set's tile width directly.
     pub fn texels_per_uv_for(&self, tile: u16) -> f32 {
         self.tile_size(tile).0 as f32
     }
@@ -3041,8 +3041,8 @@ impl PaintState {
         Ok(id)
     }
 
-    /// Insert an ID bake entry, evicting the oldest (FIFO head) when the
-    /// ring is at cap — the multi-entry cache's bounded resident cost.
+    /// Insert an ID bake entry, evicting the least-recently-promoted
+    /// entry at index 0 when the ring is at cap — bounded resident cost.
     fn push_id_bake(&mut self, entry: CachedIdBake) {
         if self.id_bake_cache.len() >= ID_BAKE_CACHE_CAP {
             self.id_bake_cache.remove(0);
@@ -12866,8 +12866,8 @@ mod tests {
             state.texels_per_uv_for_channel(tile, BASE_COLOR_CHANNEL),
             512.0
         );
-        // The old set-scale form is unchanged (the quick mask + the
-        // four L2b arms read it — the kill report names them).
+        // The legacy set-scale helper stays unchanged for compatibility
+        // and tests; production arms use the channel-aware form.
         assert_eq!(state.texels_per_uv_for(tile), 512.0);
     }
 

@@ -25,12 +25,12 @@
 //!   [`TransferMap::WorldNormal`]; [`TransferMap::TangentNormal`] folds it
 //!   through the per-texel UV-derivative TBN (the deferred fold
 //!   `TRANSFER_BAKE_SHADER`'s doc comment used to note — now closed).
-//! - **No cage buffer**: [`umber_mesh::bake_support::Cage`] stays CPU-side
-//!   for callers; lerping per-vertex offsets mid-shader needs a cage buffer
-//!   the app-wiring slice adds later. The front/back
-//!   [`umber_mesh::bake_support::TransferClamps`] DO enter v1 (the shader
-//!   mirrors `TransferClamps::clamps_hit`; the CPU type itself is not
-//!   re-declared here).
+//! - **Cage buffer**: per-vertex cage offsets are uploaded as padded
+//!   `vec4` records and interpolated by winning low-triangle barycentrics;
+//!   the low index buffer is likewise padded for WGSL's 16-byte stride.
+//!   The front/back [`umber_mesh::bake_support::TransferClamps`] DO enter
+//!   v1 (the shader mirrors `TransferClamps::clamps_hit`; the CPU type
+//!   itself is not re-declared here).
 //! - **Empty HIGH bakes background**: a HIGH mesh with no triangles means
 //!   every texel misses, so the pass short-circuits to an all-zeros map
 //!   without touching the GPU dispatch (which also sidesteps binding a

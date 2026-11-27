@@ -42,16 +42,15 @@ queue row C2-13..19, closed 2026-10-15.]
 5. **The requirements marked** — ✓ the census current through the
    core-loop phase: all six criticals' rows marked ✓ code with the
    code-vs-reachable split (the last marks: `472b774`).
-6. **The perf baselines** — MET. Every sub-item the 10-15 audit named is
-   closed (queue row C2-13..19, ALL SEVEN CLOSED): the nightly runs
-   (C2-14), the gate is leak-proof (C2-15), and the 60 fps / 1M-tri /
-   4K budget is measured on real hardware (C2-16 — the RTX 3070
-   record: viewport p95 0.2034 ms vs the 16.7 ms budget, kill report
-   `2026-10-19-real-gpu-budget`). The baseline was reseeded from
+6. **The perf baselines** — PARTIAL. The nightly and leak-proof
+   harness items are closed (C2-13..19): the baseline was reseeded from
    authentic runs after the runner-fleet drift conviction
-   (`c53a08d`/`b1d3660`, triage in `docs/perf/protocol.md`) and the
-   nightly is drift-hardened — median-of-3 plus a same-tip canary leg
-   (`dc4b355`). Hardened schedule runs subsequently passed on pushed tips.
+   (`c53a08d`/`b1d3660`), and the hardened schedule subsequently passed.
+   The RTX 3070 record (viewport p95 0.2034 ms vs 16.7 ms, kill report
+   `2026-10-19-real-gpu-budget`) covers 1,002,252 triangles plus a
+   **resident-but-unsampled** 4K set (`ref_scene.rs:11-17,343-348`).
+   It does not close the full sampled-4K measurement: binding and
+   measuring that set on real hardware remains an open HW gate.
 7. **SPEC ratified** (Bessa) — MET 2026-11-16: Bessa answered the
    alignment form "ratify v1.1 now" (draft `spec-v1.1-amendment-draft.md`
    + `spec-ratification-brief.md` were ready).
