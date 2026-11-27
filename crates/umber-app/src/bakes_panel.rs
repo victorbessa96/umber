@@ -5240,6 +5240,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
         let path = out.join("map.png");
+        eprintln!("D3D5_STAGE entering worker {selection:?}");
         let records = run_bake(BakeRequest {
             device: gpu.device.clone(),
             queue: gpu.queue.clone(),
@@ -5265,7 +5266,9 @@ mod tests {
             special,
         })
         .expect("single D3-D5 worker branch must execute");
+        eprintln!("D3D5_STAGE worker returned {selection:?}");
         assert_eq!(records.len(), 1, "one selected output");
+        eprintln!("D3D5_STAGE decoding output {selection:?}");
         let (_w, _h, decoded) = umber_export::png::read_png_rgba8(&records[0].path)
             .expect("the worker output must decode");
         assert!(!decoded.is_empty(), "decoded output must not be empty");
