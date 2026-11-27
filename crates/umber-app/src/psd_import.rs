@@ -815,7 +815,11 @@ fn over_pixel(dst: &mut [u8], src: &[u8], mode: UmberBlendMode, coverage: f32) {
         // The three mapped modes never return `None`; the fallback keeps
         // totality if `umber-core` ever narrows them.
         let blended = mode.blend_channel(s, d).unwrap_or(s);
-        let value = blended * sa + d * (1.0 - sa);
+        // Straight-alpha source-over: destination contribution is weighted
+        // by dst_a, then normalized by the resulting coverage. Without this
+        // divide, translucent layers are darkened before the publisher
+        // premultiplies them a second time.
+        let value = (blended * sa + d * dst_a * (1.0 - sa)) / out_a;
         dst[channel] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
     }
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -2014,5 +2018,21 @@ mod tests {
         // as the mesh-map import).
         assert!(doc.undo());
         assert!(doc.layers().is_empty());
+    }
+
+    #[test]
+    fn source_over_transparent_keeps_straight_colour_until_premultiply() {
+        let mut dst = [0, 0, 0, 0];
+        over_pixel(&mut dst, &[255, 0, 0, 128], UmberBlendMode::Normal, 1.0);
+        assert_eq!(dst, [255, 0, 0, 128]);
+        let premultiplied = umber_paint::material_layer::straight_to_premultiplied(&dst);
+        assert_eq!(premultiplied, [128, 0, 0, 128]);
+    }
+
+    #[test]
+    fn source_over_weights_partial_underlay_alpha() {
+        let mut dst = [0, 0, 255, 128];
+        over_pixel(&mut dst, &[255, 0, 0, 128], UmberBlendMode::Normal, 1.0);
+        assert_eq!(dst, [170, 0, 85, 192]);
     }
 }
