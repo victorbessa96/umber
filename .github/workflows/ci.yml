@@ -17,6 +17,11 @@ on:
         description: Optional cargo test-name filter for the Windows test step
         required: false
         type: string
+      test_nocapture:
+        description: Expose Windows test stdout/stderr for native crash diagnosis
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "0 6 * * 1"
   push:
@@ -144,13 +149,15 @@ jobs:
         if: runner.os == 'Windows'
         env:
           TEST_FILTER: ${{ inputs.test_filter }}
+          TEST_NOCAPTURE: ${{ inputs.test_nocapture && '--nocapture' || '' }}
+          RUST_BACKTRACE: "1"
         run: >-
           cargo test --workspace "${env:TEST_FILTER}" --
           --skip pool_drag_session
           --skip adjacent_margin_bakes_every_map_and_differs_from_extend
           --skip agent_bake_margin_adjacent_differs_and_absent_is_extend
           --skip bake_from_high_transfers_height_and_normal_from_the_high_mesh
-          --test-threads=1
+          --test-threads=1 ${env:TEST_NOCAPTURE}
         # The GPU golden family (`renderer::tests::gpu`, 173 tests incl.
         # the height→normal goldens) is feature-gated behind `gpu`
         # (pollster device bootstrap); without this leg the workspace
