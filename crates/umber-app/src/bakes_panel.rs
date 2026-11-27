@@ -1742,7 +1742,12 @@ impl BakesPanel {
                 let src_i = |field: &str| find(&bake_param::id_multi_src_key(i, field));
                 let source = match src_i("source") {
                     Some(ParamValue::Int(v)) => match v {
-                        1 => IdSource::Material,
+                        1 => {
+                            log::warn!(
+                                "project contains IdSource::Material; material-ID hashing is unimplemented and this bake will be refused"
+                            );
+                            IdSource::Material
+                        }
                         2 => IdSource::IdMap,
                         3 => IdSource::Manual,
                         _ => IdSource::Triangle,
@@ -1782,7 +1787,12 @@ impl BakesPanel {
                     if color_arr.len() >= 3 {
                         let source_idx = color_arr[0] as u8;
                         let source = match source_idx {
-                            1 => IdSource::Material,
+                            1 => {
+                            log::warn!(
+                                "project contains IdSource::Material; material-ID hashing is unimplemented and this bake will be refused"
+                            );
+                            IdSource::Material
+                        },
                             2 => IdSource::IdMap,
                             3 => IdSource::Manual,
                             _ => IdSource::Triangle,
@@ -2756,11 +2766,6 @@ impl BakesPanel {
                                                 &mut src.source,
                                                 IdSource::Triangle,
                                                 tr("bakes.id-source-triangle"),
-                                            );
-                                            ui.selectable_value(
-                                                &mut src.source,
-                                                IdSource::Material,
-                                                tr("bakes.id-source-material"),
                                             );
                                             ui.selectable_value(
                                                 &mut src.source,
@@ -6823,6 +6828,41 @@ mod tests {
         assert_eq!(q.id_multi_sources, p.id_multi_sources);
         assert_eq!(q.id_multi_blend_mode, IdBlendMode::Max);
         assert_eq!(q.settings_snapshot(), block);
+    }
+
+    #[test]
+    fn persisted_material_source_is_refused_after_settings_load() {
+        let mut p = panel();
+        p.set_map_enabled(BakeSelection::IdMulti, true);
+        p.id_multi_sources = vec![IdSourceParams {
+            source: IdSource::Material,
+            weight: 1.0,
+            mask_path: None,
+            color: [0, 0, 0],
+        }];
+        let block = p.settings_snapshot();
+        let mut q = panel();
+        q.apply_settings(&block);
+        assert_eq!(q.id_multi_sources[0].source, IdSource::Material);
+
+        let mesh = umber_mesh::MeshData {
+            positions: vec![[0.0; 3]; 3],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2],
+            material_names: vec!["A".into()],
+            triangle_materials: vec![0],
+        };
+        let params = umber_bake::IdMultiParams {
+            sources: q.id_multi_sources,
+            blend_mode: q.id_multi_blend_mode,
+            width: 32,
+            height: 32,
+        };
+        assert!(matches!(
+            umber_bake::validate_multi(&mesh, &params),
+            Err(umber_bake::IdBakeError::MaterialAssignmentUnsupported)
+        ));
     }
 
     #[test]

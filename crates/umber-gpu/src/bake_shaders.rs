@@ -2303,10 +2303,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       src_b = f32((h >> 16u) & 0xFFu);
       src_cov = true;
     }
-    // Material source: gated — if no triangle_materials buffer bound, contributes 0
+    // Material source: unreachable after validate_multi; direct shader callers
+    // have no supported material hash and therefore no valid coverage.
     else if (src.source == 1u) {
-      // Material source not supported in v1 (no per-triangle material buffer bound)
-      // Contributes nothing, same as CPU validate_multi gate
       src_cov = false;
     }
     // IdMap source: sample existing ID map texture

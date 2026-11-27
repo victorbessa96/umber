@@ -8,11 +8,9 @@
 //!
 //! # Flavor choice (read this before extending)
 //!
-//! The design doc's v1 scope is \"Material ID ... + Vertex ID\", hedging on
-//! whether `MeshData` carries material assignments. It does not — not usefully:
-//! `MeshData::material_names` is the material *palette* (`Vec<String>`), with
-//! no per-triangle assignment array anywhere in the mesh. So the honest v1
-//! lineup is:
+//! The design doc's v1 scope is \"Material ID ... + Vertex ID\". MeshData now
+//! carries `material_names` plus `triangle_materials`, but the ID bake path
+//! does not hash that per-triangle assignment. The honest v1 lineup is:
 //!
 //! - [`IdFlavor::Triangle`] (shipped): the per-texel winning triangle index,
 //!   hashed. Deterministic masking by region, exactly what the design doc
@@ -47,13 +45,13 @@
 //!
 //! # Multi-source ID bake (D4)
 //!
-//! The [`IdMultiParams`] configuration composes multiple ID sources (Triangle
-//! hash, Material hash when per-triangle assignment lands, existing baked ID
-//! maps sampled as textures, manual uniform colors) into one composite RGBA8
-//! map. Each source has a weight ∈ [0, 1], an optional coverage mask texture,
-//! and the blend mode (`Additive`, `Max`, `Replace`) determines how sources
-//! combine. The CPU reference [`hash_source_cpu`] mirrors the shader logic
-//! exactly (same FNV-1a, same blend math, same IEEE operation order).
+//! The [`IdMultiParams`] configuration composes supported ID sources (Triangle
+//! hash, existing baked ID maps sampled as textures, manual uniform colors)
+//! into one composite RGBA8 map. Each source has a finite weight ∈ [0, 1],
+//! an optional coverage mask texture, and the blend mode (`Additive`, `Max`,
+//! `Replace`). Material remains refused until its hash path exists. The CPU
+//! reference [`hash_source_cpu`] mirrors supported-source blend math, with its
+//! documented triangle-to-texel approximation.
 
 use std::borrow::Cow;
 
@@ -74,10 +72,9 @@ pub enum IdFlavor {
     /// is the shipped flavor).
     Triangle,
     /// Material-part ID. Declared so the flavor is nameable, but rejected at
-    /// runtime with [`IdBakeError::MaterialAssignmentUnsupported`]:
-    /// `MeshData` carries only the material palette (`material_names`), not
-    /// the per-triangle assignment this flavor needs. Lands with the
-    /// high-to-low transfer pass (wave-4 item 4).
+    /// runtime with [`IdBakeError::MaterialAssignmentUnsupported`]: the ID bake
+    /// does not consume `triangle_materials` yet. Lands with the high-to-low
+    /// transfer pass (wave-4 item 4).
     Material,
 }
 
@@ -106,6 +103,20 @@ pub enum IdBakeError {
         /// The ceiling it exceeded ([`MAX_TRIS_PER_BAKE`]).
         max: u32,
     },
+    /// [`IdMultiParams::sources`] was empty.
+    #[error("ID multi-source bake has no configured sources")]
+    NoSources,
+    /// A source weight was non-finite or outside 0..=1.
+    #[error("ID multi-source weight for source {index} is not finite and in 0..=1 (got {weight})")]
+    InvalidWeight {
+        /// Index of the invalid source.
+        index: usize,
+        /// The rejected weight.
+        weight: f32,
+    },
+    /// Every configured source had zero contributing weight.
+    #[error("ID multi-source bake has no contributing weight (sum must be > 0)")]
+    NoContributingWeight,
     /// [`IdMultiParams::sources`] exceeded [`MAX_ID_MULTI_SOURCES`].
     #[error("ID multi-source bake has {count} sources, over the {max}-source budget")]
     TooManySources {
@@ -122,11 +133,11 @@ pub enum IdBakeError {
         /// Requested height.
         height: u32,
     },
-    /// [`IdFlavor::Material`] was requested, but `MeshData` carries no
-    /// per-triangle material assignment (only the `material_names` palette).
+    /// Material-ID hashing is not implemented for the per-triangle
+    /// assignment array (`MeshData::triangle_materials`).
     #[error(
-        "material ID flavor needs per-triangle material indices, which MeshData does not carry \
-         (material_names is palette-only); bake the Triangle flavor instead"
+        "material ID hashing is not implemented for MeshData::triangle_materials; \
+         bake the Triangle flavor instead"
     )]
     MaterialAssignmentUnsupported,
     /// [`bake_id_mesh`]'s position-map pass (see [`crate::position`])
@@ -426,9 +437,11 @@ fn fnv1a_triangle_cpu(tri: u32) -> [u8; 3] {
     ]
 }
 
-/// CPU reference: computes composite color for one texel given a winning
-/// triangle and barycentrics. Mirrors shader logic exactly (same FNV-1a, same
-/// blend math, same IEEE operation order). Args: `mesh` (mesh being baked, for
+/// CPU reference for supported sources: computes composite color for one
+/// texel given a winning triangle and barycentrics. Mirrors supported-source
+/// FNV-1a and blend math, with the documented triangle-to-texel approximation.
+/// Callers must run [`validate_multi`] first; Material never reaches this path.
+/// Args: `mesh` (mesh being baked, for
 /// triangle count and material indices), `params` (multi-source configuration),
 /// `tri` (winning triangle index, u32::MAX = uncovered), `bary` (barycentric
 /// coordinates, unused for ID sources, kept for parity), `id_map_tex` (optional
@@ -463,8 +476,8 @@ pub fn hash_source_cpu(
                 (hash[0] as f32, hash[1] as f32, hash[2] as f32, true)
             }
             IdSource::Material => {
-                // Gated: material assignment not available in MeshData yet.
-                // Returns zero contribution (shader does the same when buffer unbound).
+                // Unreachable after validate_multi; direct callers must validate
+                // first. This is not a supported bake result or a hash fallback.
                 (0.0, 0.0, 0.0, false)
             }
             IdSource::IdMap => {
@@ -551,11 +564,18 @@ pub fn hash_source_cpu(
 /// Validates [`IdMultiParams`] independently of any GPU call.
 ///
 /// Checks: at least one source, weights sum > 0, `Material` source rejected
-/// if no per-triangle material assignment, `IdMap` texture dimensions match
+/// unconditionally until material hashing exists, `IdMap` dimensions match
 /// target (deferred to GPU), manual colors in range (enforced by type).
 pub fn validate_multi(mesh: &MeshData, params: &IdMultiParams) -> Result<(), IdBakeError> {
+    if params
+        .sources
+        .iter()
+        .any(|source| source.source == IdSource::Material)
+    {
+        return Err(IdBakeError::MaterialAssignmentUnsupported);
+    }
     if params.sources.is_empty() {
-        return Err(IdBakeError::EmptyMesh); // repurposed: no sources configured
+        return Err(IdBakeError::NoSources);
     }
     if params.sources.len() > MAX_ID_MULTI_SOURCES {
         return Err(IdBakeError::TooManySources {
@@ -563,23 +583,17 @@ pub fn validate_multi(mesh: &MeshData, params: &IdMultiParams) -> Result<(), IdB
             max: MAX_ID_MULTI_SOURCES,
         });
     }
+    for (index, src) in params.sources.iter().enumerate() {
+        if !src.weight.is_finite() || src.weight < 0.0 || src.weight > 1.0 {
+            return Err(IdBakeError::InvalidWeight {
+                index,
+                weight: src.weight,
+            });
+        }
+    }
     let weight_sum: f32 = params.sources.iter().map(|s| s.weight).sum();
     if weight_sum <= 0.0 {
-        return Err(IdBakeError::EmptyTarget {
-            width: 0,
-            height: 0,
-        }); // repurposed: no contributing weight
-    }
-    for src in &params.sources {
-        if src.source == IdSource::Material && mesh.triangle_materials.is_empty() {
-            return Err(IdBakeError::MaterialAssignmentUnsupported);
-        }
-        if src.weight < 0.0 || src.weight > 1.0 {
-            return Err(IdBakeError::EmptyTarget {
-                width: 0,
-                height: 0,
-            }); // repurposed: weight out of range
-        }
+        return Err(IdBakeError::NoContributingWeight);
     }
     if params.width == 0 || params.height == 0 {
         return Err(IdBakeError::EmptyTarget {
@@ -1127,6 +1141,103 @@ mod tests {
     }
 
     #[test]
+    fn id_multi_material_source_rejected_even_with_assignments() {
+        let mut mesh = two_tri_mesh();
+        mesh.material_names = vec!["A".into(), "B".into()];
+        mesh.triangle_materials = vec![0, 1];
+        let params = IdMultiParams {
+            sources: vec![IdSourceParams {
+                source: IdSource::Material,
+                weight: 1.0,
+                mask_path: None,
+                color: [0, 0, 0],
+            }],
+            blend_mode: IdBlendMode::Additive,
+            width: 32,
+            height: 32,
+        };
+        let err = validate_multi(&mesh, &params).unwrap_err();
+        assert!(matches!(err, IdBakeError::MaterialAssignmentUnsupported));
+    }
+
+    #[test]
+    fn validate_multi_rejects_non_finite_and_out_of_range_weights() {
+        let mesh = two_tri_mesh();
+        for weight in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            let params = IdMultiParams {
+                sources: vec![IdSourceParams {
+                    source: IdSource::Triangle,
+                    weight,
+                    mask_path: None,
+                    color: [0, 0, 0],
+                }],
+                blend_mode: IdBlendMode::Additive,
+                width: 32,
+                height: 32,
+            };
+            assert!(matches!(
+                validate_multi(&mesh, &params),
+                Err(IdBakeError::InvalidWeight { index: 0, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_multi_distinguishes_empty_and_zero_contribution() {
+        let mesh = two_tri_mesh();
+        let empty = IdMultiParams {
+            sources: vec![],
+            blend_mode: IdBlendMode::Additive,
+            width: 32,
+            height: 32,
+        };
+        assert!(matches!(
+            validate_multi(&mesh, &empty),
+            Err(IdBakeError::NoSources)
+        ));
+        let zero = IdMultiParams {
+            sources: vec![IdSourceParams {
+                source: IdSource::Triangle,
+                weight: 0.0,
+                mask_path: None,
+                color: [0, 0, 0],
+            }],
+            ..empty
+        };
+        assert!(matches!(
+            validate_multi(&mesh, &zero),
+            Err(IdBakeError::NoContributingWeight)
+        ));
+    }
+
+    #[test]
+    fn material_gate_precedes_zero_weight_and_source_overflow() {
+        let mesh = two_tri_mesh();
+        let sources = (0..=MAX_ID_MULTI_SOURCES)
+            .map(|index| IdSourceParams {
+                source: if index == MAX_ID_MULTI_SOURCES {
+                    IdSource::Material
+                } else {
+                    IdSource::Triangle
+                },
+                weight: 0.0,
+                mask_path: None,
+                color: [0, 0, 0],
+            })
+            .collect();
+        let params = IdMultiParams {
+            sources,
+            blend_mode: IdBlendMode::Additive,
+            width: 32,
+            height: 32,
+        };
+        assert!(matches!(
+            validate_multi(&mesh, &params),
+            Err(IdBakeError::MaterialAssignmentUnsupported)
+        ));
+    }
+
+    #[test]
     fn id_multi_weight_zero_excludes_source() {
         let mesh = two_tri_mesh();
         let params_with = IdMultiParams {
@@ -1591,7 +1702,9 @@ mod tests {
             let Some((device, queue)) = try_request_device() else {
                 return;
             };
-            let mesh = split_halves_mesh();
+            let mut mesh = split_halves_mesh();
+            mesh.material_names = vec!["A".into(), "B".into()];
+            mesh.triangle_materials = vec![0, 1];
             let params = IdMultiParams {
                 sources: vec![IdSourceParams {
                     source: IdSource::Material,
