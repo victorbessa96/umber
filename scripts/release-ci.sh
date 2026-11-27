@@ -55,4 +55,26 @@ if [ "$status" -ne 0 ]; then
   echo "release-ci: RED, do not tag. Logs: gh run view $run --log-failed" >&2
   exit 1
 fi
-echo "release-ci: GREEN on ${sha:0:8}; safe to tag."
+echo "release-ci: application matrix GREEN on ${sha:0:8}; dispatching packaging.yml"
+run=""
+gh workflow run packaging.yml --ref master
+for _ in $(seq 1 30); do
+  run=$(gh run list --workflow packaging.yml --event workflow_dispatch --limit 5 \
+    --json databaseId,headSha,createdAt \
+    -q "[.[] | select(.headSha == \"$sha\" and .createdAt >= \"$since\")][0].databaseId // empty")
+  [ -n "$run" ] && break
+  sleep 5
+done
+if [ -z "$run" ]; then
+  echo "release-ci: no dispatched packaging run for ${sha:0:8} appeared" >&2
+  exit 3
+fi
+status=0
+gh run watch "$run" --exit-status --interval 60 > /dev/null || status=$?
+gh run view "$run" --json headSha,conclusion,jobs \
+  -q '"packaging \(.headSha[0:8]) \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
+if [ "$status" -ne 0 ]; then
+  echo "release-ci: packaging RED, do not tag. Logs: gh run view $run --log-failed" >&2
+  exit 1
+fi
+echo "release-ci: application + packaging GREEN on ${sha:0:8}; safe to tag."

@@ -278,14 +278,62 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  # Native Linux packages are part of THIS release graph: host creates the
+  # release first, then these jobs attach to it. Their failures fail the run.
+  appimage:
+    name: build AppImage (x86_64)
+    needs: host
+    uses: ./.github/workflows/appimage-build.yml
+    secrets: inherit
+    with:
+      attach-release: true
+
+  flatpak:
+    name: build Flatpak bundle (x86_64)
+    needs: host
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install flatpak + builder (+ the SVG pixbuf loader the compose needs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
+      - name: Add Flathub + install 26.08 platform/SDK
+        run: |
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//26.08 org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08
+      - name: Render the source pin and vendor closure from the tagged SHA
+        run: python3 flatpak/gen-cargo-sources.py
+      - name: Build the Flatpak
+        run: |
+          sudo flatpak-builder --disable-rofiles-fuse --force-clean --repo=repo build-dir flatpak/org.umber.Umber.json
+      - name: Export single-file bundle
+        run: |
+          sudo flatpak build-bundle repo Umber.flatpak org.umber.Umber --arch=x86_64
+          sudo chown "$(id -u):$(id -g)" Umber.flatpak
+          ls -la Umber.flatpak
+      - name: Upload Flatpak bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Umber-flatpak-bundle
+          path: Umber.flatpak
+      - name: Attach to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" Umber.flatpak --clobber
+
   announce:
     needs:
       - plan
       - host
+      - appimage
+      - flatpak
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && needs.appimage.result == 'success' && needs.flatpak.result == 'success' }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

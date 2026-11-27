@@ -1,0 +1,92 @@
+name: appimage-build
+
+on:
+  workflow_call:
+    inputs:
+      attach-release:
+        description: Attach the packed AppImage to github.ref_name after upload
+        required: true
+        type: boolean
+
+jobs:
+  build:
+    name: build AppImage (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the staged binary
+        run: cargo --locked build --release -p umber-app
+      - name: Stage the AppDir tree
+        run: |
+          set -eu
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/metainfo AppDir/usr/share/licenses/umber
+          cp target/release/umber AppDir/usr/bin/umber
+          cp LICENSE LICENSES/THIRD_PARTY_FONTS.txt THIRD_PARTY.md AppDir/usr/share/licenses/umber/
+          cp appimage/org.umber.Umber.desktop AppDir/org.umber.Umber.desktop
+          cp appimage/org.umber.Umber.desktop AppDir/usr/share/applications/org.umber.Umber.desktop
+          cp appimage/umber.svg AppDir/umber.svg
+          cp appimage/umber.svg AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg
+          cp appimage/org.umber.Umber.metainfo.xml AppDir/usr/share/metainfo/org.umber.Umber.metainfo.xml
+      - name: Render the required PNG icon and .DirIcon
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends librsvg2-bin
+          rsvg-convert -w 256 -h 256 appimage/umber.svg > AppDir/umber.png
+          ln -s umber.png AppDir/.DirIcon
+          test -s AppDir/umber.png
+          test -L AppDir/.DirIcon
+      - name: Fetch packaging tools
+        env:
+          APPIMAGETOOL_VERSION: '1.9.1'
+          APPIMAGETOOL_URL: 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage'
+          LINUXDEPLOY_URL: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
+        run: |
+          set -eu
+          curl -LsSf -o linuxdeploy.AppImage "${LINUXDEPLOY_URL}"
+          curl -LsSf -o appimagetool.AppImage "${APPIMAGETOOL_URL}"
+          chmod +x linuxdeploy.AppImage appimagetool.AppImage
+      - name: Bundle deps + pack the AppImage
+        env:
+          APPIMAGETOOL_VERSION: '1.9.1'
+        run: |
+          set -euo pipefail
+          ./linuxdeploy.AppImage --appdir AppDir \
+            --executable AppDir/usr/bin/umber \
+            --desktop-file AppDir/usr/share/applications/org.umber.Umber.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg
+          ./appimagetool.AppImage AppDir Umber-x86_64.AppImage 2>&1 | tee appimagetool.log
+          if grep -q '^::error::' appimagetool.log; then
+            echo 'appimagetool reported a packaging error'
+            exit 1
+          fi
+          ./appimagetool.AppImage --version | grep -F "${APPIMAGETOOL_VERSION}"
+      - name: Assert the Vulkan loader was NOT bundled
+        run: |
+          set -eu
+          if find AppDir -iname 'libvulkan*' -o -iname '*Vulkan*' | grep -q .; then
+            echo 'packaging bug: Vulkan loader/ICD files must stay host-provided'
+            find AppDir -iname 'libvulkan*' -o -iname '*Vulkan*'
+            exit 1
+          fi
+      - name: Payload-integrity smoke (headless — no display needed)
+        run: |
+          set -eu
+          ls -la Umber-*.AppImage
+          ./Umber-*.AppImage --appimage-extract usr/bin/umber
+          cmp squashfs-root/usr/bin/umber AppDir/usr/bin/umber
+          rm -rf squashfs-root
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Umber-x86_64-AppImage
+          path: 'Umber-*.AppImage'
+      - name: Attach to GitHub Release
+        if: inputs.attach-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" Umber-*.AppImage --clobber

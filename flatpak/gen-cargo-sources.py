@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """gen-cargo-sources.py — render the Flatpak manifest hermetic.
 
-Reads Cargo.lock (v3/v4) and the hand-maintained template
-`org.umber.Umber.json.in`, splices one flatpak-builder source entry
-per registry crate into the `@@CARGO_SOURCES@@` slot, and writes
-`org.umber.Umber.json` (the committed, CI-validated artifact).
+Reads the manifest-pinned commit's Cargo.lock (v3/v4) and the
+hand-maintained template `org.umber.Umber.json.in`, splices one
+flatpak-builder source entry per registry crate into the
+`@@CARGO_SOURCES@@` slot, and writes `org.umber.Umber.json` (the committed,
+CI-validated artifact). Development never reads a different working-tree
+lockfile; tag builds update source pin and lock source to the same SHA.
 
 Each registry package becomes:
 
@@ -34,8 +36,9 @@ skipped: the git source IS the workspace. Any package with a
 `source` that is not the crates.io registry is an error — it would
 need its own manifest source shape, not this generator's.
 
-The lint job (packaging.yml) re-runs this and diffs, so a Cargo.lock
-change without a regenerated manifest fails CI (the drift gate).
+The lint job (packaging.yml) re-runs this and diffs, proving that the
+manifest and its vendor closure belong to the pinned source commit. It is
+not a claim that development tracks a different working-tree Cargo.lock.
 
 Usage: python3 flatpak/gen-cargo-sources.py [--check]
   --check: exit 1 if the rendered manifest differs from the committed
@@ -43,12 +46,13 @@ Usage: python3 flatpak/gen-cargo-sources.py [--check]
 """
 
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-LOCK = HERE.parent / "Cargo.lock"
 TEMPLATE = HERE / "org.umber.Umber.json.in"
 OUT = HERE / "org.umber.Umber.json"
 MARKER = '"@@CARGO_SOURCES@@"'
@@ -119,9 +123,67 @@ def parse_lock(text: str):
     return crates
 
 
-def render() -> str:
-    crates = parse_lock(LOCK.read_text())
-    template = TEMPLATE.read_text()
+def default_git_show(commit: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{commit}:Cargo.lock"],
+        cwd=HERE.parent,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.exit(
+            f"gen-cargo-sources: cannot read Cargo.lock for pinned commit {commit}: "
+            f"{result.stderr.strip()}"
+        )
+    return result.stdout
+
+
+def source_context(template: str, env=None, git_show=None):
+    """Return (template, lock_text, commit) with one source/lock owner.
+
+    Development uses the template's pinned commit. A GitHub tag build
+    rewrites source tag + commit to the same release SHA before rendering.
+    `git_show` is injectable so the ownership rule is unit-testable without
+    a network or a second repository.
+    """
+    env = os.environ if env is None else env
+    git_show = default_git_show if git_show is None else git_show
+    document = json.loads(template)
+    source = next(
+        source
+        for module in document["modules"]
+        for source in module["sources"]
+        if source.get("type") == "git"
+    )
+    pinned = source["commit"]
+    ref = env.get("GITHUB_REF", "")
+    release = ref.startswith("refs/tags/")
+    commit = env.get("GITHUB_SHA") if release else pinned
+    if not commit or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        sys.exit(f"gen-cargo-sources: invalid source commit {commit!r}")
+    if release:
+        tag = env.get("GITHUB_REF_NAME") or ref.rsplit("/", 1)[-1]
+        template, replacements = re.subn(r'"tag": "[^"]*"', f'"tag": {json.dumps(tag)}', template, count=1)
+        template, commit_replacements = re.subn(
+            r'"commit": "[^"]*"', f'"commit": "{commit}"', template, count=1
+        )
+        if replacements != 1 or commit_replacements != 1:
+            sys.exit("gen-cargo-sources: could not update the release source pin")
+        updated = json.loads(template)
+        updated_source = next(
+            source
+            for module in updated["modules"]
+            for source in module["sources"]
+            if source.get("type") == "git"
+        )
+        if updated_source["commit"] != commit or updated_source.get("tag") != tag:
+            sys.exit("gen-cargo-sources: release source pin did not match GITHUB_SHA")
+    return template, git_show(commit), commit
+
+
+def render() -> tuple[str, int]:
+    template, lock_text, _ = source_context(TEMPLATE.read_text())
+    crates = parse_lock(lock_text)
     if MARKER not in template:
         sys.exit(f"gen-cargo-sources: {TEMPLATE.name} lost its {MARKER} slot")
     entries = ",\n".join(
@@ -143,12 +205,12 @@ def render() -> str:
     rendered = template.replace(MARKER, entries)
     # The splice must produce valid JSON — fail here, never in CI's lint.
     json.loads(rendered)
-    return rendered
+    return rendered, len(crates)
 
 
 def main() -> None:
     check = "--check" in sys.argv[1:]
-    rendered = render()
+    rendered, crate_count = render()
     if check:
         committed = OUT.read_text()
         if committed != rendered:
@@ -159,8 +221,7 @@ def main() -> None:
             )
         return
     OUT.write_text(rendered)
-    crates = parse_lock(LOCK.read_text())
-    print(f"gen-cargo-sources: wrote {OUT.name} — {len(crates)} registry crates")
+    print(f"gen-cargo-sources: wrote {OUT.name} — {crate_count} registry crates")
 
 
 if __name__ == "__main__":

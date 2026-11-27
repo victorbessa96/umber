@@ -3,9 +3,10 @@
 # Split from ci.yml on purpose: the heavy jobs (a full release-profile
 # compile plus ~1 GB of Flatpak SDK downloads) must NOT run on every push.
 # Per-push proof is the `lint-packaging` job (manifest parse, desktop-file
-# and AppStream validation — seconds, no SDK). Artifact production runs on
-# release tags, `workflow_dispatch`, and (AppImage only) pushes that touch
-# the packaging surface. See flatpak/README.md and appimage/README.md for
+# and AppStream validation — seconds, no SDK). AppImage production runs on
+# `workflow_dispatch` and packaging-surface pushes; development Flatpak runs
+# on `workflow_dispatch`. Tag-native production lives in release.yml after
+# `host`. See flatpak/README.md and appimage/README.md for
 # the v1 boundaries each job proves.
 
 name: packaging
@@ -17,18 +18,19 @@ on:
       - 'appimage/**'
       - 'flatpak/**'
       - '.github/workflows/packaging.yml'
-    tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+      - 'Cargo.lock'
   pull_request:
     paths:
       - 'appimage/**'
       - 'flatpak/**'
       - '.github/workflows/packaging.yml'
+      - 'Cargo.lock'
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned packaging tools (re-verify at gate; see appimage/README.md).
+  # Toolchain policy: appimagetool is pinned for the explicit pack step;
+  # linuxdeploy and its type2 runtime are rolling (see appimage/README.md).
   APPIMAGETOOL_VERSION: '1.9.1'
   APPIMAGETOOL_URL: 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage'
   LINUXDEPLOY_URL: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
@@ -39,6 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The manifest may pin an ancestor, so depth 1 cannot prove its lockfile.
+          fetch-depth: 0
 
       - name: Flatpak manifest parses as JSON
         run: python3 -m json.tool flatpak/org.umber.Umber.json > /dev/null
@@ -46,9 +51,10 @@ jobs:
       - name: Manifest/runtime coupling assert
         run: python3 flatpak/check-runtime-coupling.py
 
-      # The manifest is GENERATED (gen-cargo-sources.py renders it from
-      # Cargo.lock + the .in template). A Cargo.lock change without a
-      # regenerated manifest fails here — the drift gate.
+      # The manifest is GENERATED from the pinned source commit's own
+      # Cargo.lock + the .in template. The drift gate proves source and
+      # vendor closure never come from different commits; it does not
+      # pretend the development manifest tracks a different working-tree lock.
       - name: Flatpak manifest drift gate (regenerate + diff)
         run: |
           python3 flatpak/gen-cargo-sources.py --check
@@ -76,84 +82,19 @@ jobs:
 
   appimage:
     name: build AppImage (x86_64)
-    # Heavy (full release compile + tool downloads): tags, manual dispatch,
-    # or a push that touched the packaging surface — never every PR.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'push'
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        # pinned via rust-toolchain.toml (1.97.0) — see file at repo root
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build the staged binary
-        run: cargo --locked build --release -p umber-app
-
-      - name: Stage the AppDir tree (see appimage/README.md)
-        run: |
-          set -eu
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/metainfo AppDir/usr/share/licenses/umber
-          cp target/release/umber AppDir/usr/bin/umber
-          # The licence + the embedded fonts' notices (OFL/UFL/MIT require them
-          # with every copy), in the standard licences dir.
-          cp LICENSE LICENSES/THIRD_PARTY_FONTS.txt THIRD_PARTY.md AppDir/usr/share/licenses/umber/
-          cp appimage/org.umber.Umber.desktop AppDir/org.umber.Umber.desktop
-          cp appimage/org.umber.Umber.desktop AppDir/usr/share/applications/org.umber.Umber.desktop
-          cp appimage/umber.svg AppDir/umber.svg
-          cp appimage/umber.svg AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg
-          cp appimage/org.umber.Umber.metainfo.xml AppDir/usr/share/metainfo/org.umber.Umber.metainfo.xml
-
-      - name: Fetch pinned packaging tools
-        run: |
-          set -eu
-          curl -LsSf -o linuxdeploy.AppImage "${LINUXDEPLOY_URL}"
-          curl -LsSf -o appimagetool.AppImage "${APPIMAGETOOL_URL}"
-          chmod +x linuxdeploy.AppImage appimagetool.AppImage
-
-      - name: Bundle deps + pack the AppImage
-        run: |
-          set -eu
-          ./linuxdeploy.AppImage --appdir AppDir \
-            --executable AppDir/usr/bin/umber \
-            --desktop-file AppDir/usr/share/applications/org.umber.Umber.desktop \
-            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg \
-            --output appimage
-
-      - name: Assert the Vulkan loader was NOT bundled
-        run: |
-          set -eu
-          if find AppDir -iname 'libvulkan*' -o -iname '*Vulkan*' | grep -q .; then
-            echo 'packaging bug: Vulkan loader/ICD files must stay host-provided'
-            find AppDir -iname 'libvulkan*' -o -iname '*Vulkan*'
-            exit 1
-          fi
-
-      - name: Payload-integrity smoke (headless — no display needed)
-        run: |
-          set -eu
-          ls -la Umber-*.AppImage
-          ./Umber-*.AppImage --appimage-extract usr/bin/umber
-          cmp squashfs-root/usr/bin/umber AppDir/usr/bin/umber
-          rm -rf squashfs-root
-          echo 'OK: extracted payload is byte-identical to the staged binary'
-
-      - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Umber-x86_64-AppImage
-          path: 'Umber-*.AppImage'
-
-      - name: Attach to GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" Umber-*.AppImage --clobber
+    if: github.event_name != 'pull_request'
+    needs: lint-packaging
+    uses: ./.github/workflows/appimage-build.yml
+    secrets: inherit
+    with:
+      attach-release: false
 
   flatpak:
     name: build Flatpak bundle (x86_64)
-    # Heaviest job (~1 GB runtime+SDK): release tags or manual dispatch only.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    needs: lint-packaging
+    # Heaviest job (~1 GB runtime+SDK): manual development dispatch only.
+    # Tag-native publication is owned by release.yml, which re-pins from the tag.
+    if: github.event_name == 'workflow_dispatch'
     # ubuntu-latest rotated to ubuntu-26.04 (resolute) on 2026-10-21 and
     # that image's bwrap/rofiles sandbox dies at module-build setup
     # ("bwrap: Can't find source path .../rofiles/rofiles-*/files:
@@ -215,9 +156,3 @@ jobs:
         with:
           name: Umber-flatpak-bundle
           path: Umber.flatpak
-
-      - name: Attach to GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" Umber.flatpak --clobber

@@ -32,9 +32,9 @@ see below), not by this kill (no cargo / no downloads in the claw).
   submission-shaped. The hermetic closure is what run 38883955783's
   red demanded (the sandbox has no DNS: `index.crates.io`
   unresolvable, exit 101).
-- **Runtime `org.freedesktop.Platform` 24.08, SDK `org.freedesktop.Sdk`.**
-  24.08 is the brief-pinned branch (verified live on Flathub at kill time;
-  25.08/26.08 exist — bumping the branch is a one-line follow-up, not v1).
+- **Runtime `org.freedesktop.Platform` 26.08, SDK `org.freedesktop.Sdk`.**
+  26.08 is the current manifest-pinned branch (verified live on Flathub;
+  the older 24.08 recipe was stale and did not install the required runtime).
 - **No `org.freedesktop.Platform.Vulkan` extension — it does not exist.**
   The brief named it; the flatpak-docs runtime/extension list (verified
   2026-10-12) names Mesa/Vulkan drivers only under
@@ -52,7 +52,7 @@ see below), not by this kill (no cargo / no downloads in the claw).
 - **No extra SDK modules v1.** winit 0.30.13 links against X11/Wayland
   client libs at build time and `x11-dl` 2.21.0 dlopens libX11/libXi at
   runtime (see `umber-app/Cargo.toml`); wayland-client 0.31.15 likewise.
-  The 24.08 SDK ships all of these dev libraries, so the manifest has a
+  The 26.08 SDK ships all of these dev libraries, so the manifest has a
   single module. If the CI flatpak job fails on a missing `-dev` package,
   that failure names the module to add — recorded, not guessed.
 - **finish-args, each with a reason:** `--share=ipc` (X11/Wayland
@@ -64,8 +64,10 @@ see below), not by this kill (no cargo / no downloads in the claw).
   (project/mesh homes; one-off picks go through portals). No
   `--filesystem=host`, no PulseAudio (the app produces no audio).
 - **Git source pinned to `v0.1.0-alpha.1`** (template, 2026-11-16, ship-time
-  pin per the installers design doc; commit bc4d642f). The CI job builds
-  the working tree as-is; future releases re-pin the template.
+  pin per the installers design doc; commit bc4d642f). Development/manual
+  builds use that pinned commit's own Cargo.lock; release builds regenerate
+  the source pin and registry closure from the tagged SHA, never from a
+  different working-tree lockfile.
 - **Metainfo has no `<screenshot>`.** Screenshots must be hosted URLs;
   inventing one would fail `appstreamcli validate` and lie to users.
   Adding the screenshot URL is queued behind the first public release.
@@ -84,7 +86,7 @@ see below), not by this kill (no cargo / no downloads in the claw).
 ## Runtime dependencies (for the manifest record)
 
 At runtime the Flatpak carries: the `umber` binary (statically links
-wasmtime/Cranelift — no runtime `.so` concern), the freedesktop 24.08
+wasmtime/Cranelift — no runtime `.so` concern), the freedesktop 26.08
 runtime (X11, Wayland, Mesa incl. Vulkan drivers via `--device=dri`),
 and the host GPU stack. The Vulkan loader is system-provided per the
 installers design doc; nothing driver-shaped is bundled.
@@ -93,12 +95,14 @@ installers design doc; nothing driver-shaped is bundled.
 
 ```sh
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+flatpak install flathub org.freedesktop.Platform//26.08 org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08
 flatpak-builder --force-clean build-dir org.umber.Umber.json
 flatpak-builder --run build-dir org.umber.Umber.json umber
 ```
 
-CI runs the build on release tags and `workflow_dispatch` only: the
-runtime + SDK download is ~1 GB and too heavy for every push. The
-per-push proof is manifest/desktop/metainfo lint (see
-`.github/workflows/packaging.yml`).
+Tag-native CI runs in `.github/workflows/release.yml` after `host` creates
+the release; `python3 flatpak/gen-cargo-sources.py` first rewrites the source
+pin and registry closure from that tag. Development packaging runs on
+`workflow_dispatch` and packaging-surface pushes. The runtime + SDK download
+is ~1 GB and too heavy for every push, so per-push proof stays at
+manifest/desktop/metainfo lint (see `.github/workflows/packaging.yml`).

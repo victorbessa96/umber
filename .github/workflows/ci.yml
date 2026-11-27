@@ -52,8 +52,9 @@ jobs:
 
   # Docs-only PRs skip the build matrix (absorbed 2026-10-14 from
   # photocraft's ci.yml `platforms` job, made conservative): the matrix
-  # runs on EVERY push to master, on a PR touching anything outside the
-  # docs allowlist, and on any PR labelled `full-ci`. Diff computed with
+  # runs on workflow_dispatch, weekly schedule, version tags, and PRs
+  # touching anything outside the docs allowlist, plus PRs labelled
+  # `full-ci`. Ordinary master pushes stay with safe-push.py. Diff computed with
   # plain git against the PR base — no third-party action. An error in
   # this job (e.g. the base is unreachable) fails OPEN: code=true.
   changes:
@@ -129,7 +130,7 @@ jobs:
       # CLI bakes 10.3 min). The panel's end-to-end Bake-from-high test
       # timed out at 60 s there (run 38804748176); umber-bake's own transfer
       # GPU tests still cover the transfer on D3D12. Linux runs all four on
-      # every push; every other GPU test still exercises Windows' D3D12 path.
+      # every matrix run; every other GPU test still exercises Windows' D3D12 path.
       # `--skip` matches test names in every binary.
       - name: Tests (Windows, minus the four WARP-slow GPU tests)
         if: runner.os == 'Windows'

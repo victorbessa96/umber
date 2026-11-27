@@ -60,14 +60,32 @@ Windows CI uses WARP.
 
 ## Before you open a PR
 
-CI runs these exact gates on Linux and Windows; run them first:
+CI is a release gate, not an every-push matrix: it runs on demand, weekly,
+on version tags, and on PRs. Ordinary master pushes are gated locally by
+`python3 scripts/safe-push.py`. Before a PR, run the common gates:
 
 ```bash
+python3 scripts/check-layers.py
+python3 scripts/scorecard.py --check
+python3 scripts/parity.py --check
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo test -p umber-gpu --features gpu   # the GPU golden family
+cargo build --release --workspace
 ```
+
+Platform-specific CI legs:
+
+- Linux also runs `UMBER_RUN_GPU_TESTS=1 cargo test -p umber-gpu --features gpu`,
+  feature-on clippy, `UMBER_RUN_GPU_TESTS=1 cargo test -p umber-bake --features gpu -- --test-threads=1`,
+  OCIO bundled tests, and the release-GUI E2E smoke. The opt-in is required;
+  without it the GPU parity family compiles but skips at runtime.
+- Windows runs the workspace minus four intentionally slow WARP tests:
+  `pool_drag_session`, `adjacent_margin_bakes_every_map_and_differs_from_extend`,
+  `agent_bake_margin_adjacent_differs_and_absent_is_extend`, and
+  `bake_from_high_transfers_height_and_normal_from_the_high_mesh`.
+- Windows alone compiles and runs `cargo test -p stylus --features winink`.
+- Release CI additionally requires the packaging workflow before a tag.
 
 Then:
 
