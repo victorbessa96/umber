@@ -44,7 +44,9 @@ A pure regression covers row alignment and band sizing. Three real worker regres
 
 - `46042480948` at `e49322ea`: `worker_ground_plane_only_smoke` really executes and passes **1/1 in 25.74 seconds** on Windows; Ubuntu and the full matrix are green.
 - `46044621856` at `203e760c`: the original `d3_d5_maps_execute_through_app_worker` really executes and passes **1/1 in 408.31 seconds** on Windows; Ubuntu, Windows release smoke, and the complete targeted matrix are green.
-- `46047753773` at `203e760c`: full unfiltered CI matrix dispatched, currently pending.
+- `46047753773` at `203e760c`: the full unfiltered Windows app bin reached **928 passed, 1 failed** in 1730.79 seconds. The native GroundPlane abort is cleared; the only failure was the unrelated cross-platform control timeout assertion.
+- `651b63d9` accepts both Unix `WouldBlock` and Windows `TimedOut` for that assertion. `46068221385` then proves the control test **1/1 green in 0.08 seconds** on Windows at the current tip.
+- `46060255697`: Ubuntu completed green; the unfiltered Windows rerun exceeded one hour without a verdict and was cancelled. The GroundPlane lane closes on the successful full-suite abort clearance plus both targeted Windows oracles, not on a claimed current-tip full-matrix green.
 
 ## Non-goals
 
