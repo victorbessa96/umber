@@ -339,9 +339,12 @@ def main() -> int:
             print("safe-push: no crate touched, clippy/test gates skipped")
         else:
             print(f"safe-push: clippy + test on {len(crates)} crate(s): {' '.join(crates)}")
-            # Warm cache: the tree's own target dir; the shared conventions.
+            # Never share the main repo's target with a temporary worktree:
+            # env!("CARGO_MANIFEST_DIR") would otherwise leave deleted gate
+            # paths in artifacts later reused by the real checkout.
             ENV.update(
-                CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR") or os.path.join(root, "target"),
+                CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR")
+                or os.path.join(gate_tree, "target"),
                 CARGO_BUILD_JOBS=os.environ.get("CARGO_BUILD_JOBS", "3"),
                 CARGO_PROFILE_TEST_DEBUG="0",
                 CARGO_PROFILE_DEV_DEBUG="0",

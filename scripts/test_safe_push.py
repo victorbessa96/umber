@@ -90,6 +90,7 @@ class Repo:
             body = (
                 "#!/bin/sh\n"
                 f'echo "$@" >> {log}\n'
+                f'echo "TARGET=$CARGO_TARGET_DIR" >> {log}\n'
                 'case "$1" in\n'
                 f"  fmt) exit {c.get('fmt', 0)} ;;\n"
                 f"  clippy) exit {c.get('clippy', 0)} ;;\n"
@@ -121,6 +122,18 @@ class Repo:
         with open(path) as fh:
             return [ln.split() for ln in fh.read().splitlines()]
 
+    def cargo_target_dir(self):
+        path = os.path.join(self.bin, "cargo.log")
+        if not os.path.exists(path):
+            return None
+        with open(path) as fh:
+            targets = [
+                ln.removeprefix("TARGET=")
+                for ln in fh.read().splitlines()
+                if ln.startswith("TARGET=")
+            ]
+        return targets[-1] if targets else None
+
     def gated_crates(self, sub):
         """The -p crates of the last `cargo <sub>` call ([] = never ran)."""
         calls = [c for c in self.cargo_calls() if c and c[0] == sub]
@@ -145,6 +158,7 @@ class Repo:
         env = dict(os.environ)
         env["PATH"] = self.bin + os.pathsep + env["PATH"]
         env.pop("DRAGON_SESSION", None)
+        env.pop("CARGO_TARGET_DIR", None)
         # A private lock: a sibling's real cargo must not stall the stubs.
         env["UMBER_CARGO_LOCK"] = os.path.join(self.base, "cargo.lock")
         env.pop("HERMES_SESSION_ID", None)
@@ -370,6 +384,27 @@ def a_leaf_change_gates_only_the_leaf():
         code, out = r.guard()
         expect(code == 0, f"exit {code}: {out}")
         expect(r.gated_crates("test") == ["umber-gui"], f"test on {r.gated_crates('test')}")
+    finally:
+        r.close()
+
+
+@case
+def gate_target_is_isolated_from_the_main_repo():
+    r = Repo()
+    try:
+        r.commit("crates/umber-gui/src/x.rs", ME)
+        code, out = r.guard()
+        expect(code == 0, f"exit {code}: {out}")
+        target = r.cargo_target_dir()
+        if target is None:
+            raise AssertionError("cargo gate did not record CARGO_TARGET_DIR")
+        parts = target.split(os.sep)
+        expect(
+            len(parts) >= 2
+            and parts[-1] == "target"
+            and parts[-2].startswith("safe-push-"),
+            f"gate target must be <temporary worktree>/target, got {target!r}",
+        )
     finally:
         r.close()
 
