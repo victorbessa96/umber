@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 
 use crate::agent::Session;
 use crate::security::{self, ConnectionLimiter, LineRead, MAX_CONNECTIONS};
-use crate::workspace::{Access, AuthorizedWorkspace};
+use crate::workspace::AuthorizedWorkspace;
 
 /// The methods `serve` answers (besides `auth`).
 pub const METHODS: &[&str] = &["ping", "methods", "step", "steps"];
@@ -173,13 +173,12 @@ fn handle_line(
             let Some(mut step) = params.get("step").cloned() else {
                 return err("`step` must be an object".to_string(), false);
             };
-            let mode = step_mode(&step);
-            if let Err(e) = ws.confine_step(&mut step, mode) {
+            if let Err(e) = ws.confine_step(&mut step) {
                 return err(format!("{e:#}"), false);
             }
             let (reply, _quit) = sess.reply(*index, &format!("{step}\n"));
             *index += 1;
-            ok(reply)
+            (step_reply(&id, reply), false)
         }
         "steps" => {
             let steps = match params.get("steps").and_then(Value::as_array) {
@@ -199,8 +198,7 @@ fn handle_line(
             let mut results = Vec::new();
             for (i, s) in steps.iter().enumerate() {
                 let mut s = s.clone();
-                let mode = step_mode(&s);
-                if let Err(e) = ws.confine_step(&mut s, mode) {
+                if let Err(e) = ws.confine_step(&mut s) {
                     return err(format!("steps[{i}]: {e:#}"), false);
                 }
                 let (reply, _quit) = sess.reply(*index, &format!("{s}\n"));
@@ -208,8 +206,20 @@ fn handle_line(
                 let step_ok = reply["ok"].as_bool().unwrap_or(false);
                 results.push(reply.clone());
                 if !step_ok {
-                    return ok(
-                        json!({"completed": i, "results": results, "failed": {"index": i, "error": reply.get("error").cloned().unwrap_or(Value::Null)}}),
+                    let error = reply.get("error").cloned().unwrap_or(Value::Null);
+                    let batch = json!({
+                        "completed": i,
+                        "results": results,
+                        "failed": {"index": i, "error": error},
+                    });
+                    return (
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": batch["failed"]["error"].clone(),
+                            "result": batch,
+                        }),
+                        false,
                     );
                 }
             }
@@ -219,15 +229,15 @@ fn handle_line(
     }
 }
 
-fn step_mode(step: &Value) -> Access {
-    let name = step
-        .as_object()
-        .and_then(|o| o.keys().next())
-        .cloned()
-        .unwrap_or_default();
-    match name.as_str() {
-        "project_save" | "export" | "bake" | "paint_snapshot" => Access::Write,
-        _ => Access::Read,
+/// Wrap one agent reply in the serve envelope, propagating the step's own
+/// `ok`: an agent-level failure is a top-level failure here too (the
+/// regression: every step reply used to ride an outer `ok: true`).
+fn step_reply(id: &Value, reply: Value) -> Value {
+    if reply["ok"].as_bool().unwrap_or(false) {
+        json!({"id": id, "ok": true, "result": reply})
+    } else {
+        let error = reply.get("error").cloned().unwrap_or(Value::Null);
+        json!({"id": id, "ok": false, "error": error, "result": reply})
     }
 }
 
@@ -349,5 +359,63 @@ mod tests {
         let (r, close) = handle_line(&mut sess, &ws, &mut authed, &mut idx, "tok", "not json");
         assert_eq!(r["ok"], false);
         assert!(!close);
+    }
+
+    #[test]
+    fn an_agent_level_error_is_a_top_level_failure() {
+        let (mut sess, ws, mut authed, mut idx) = fresh();
+        let token = "0123456789abcdef0123456789abcdef";
+        handle_line(
+            &mut sess,
+            &ws,
+            &mut authed,
+            &mut idx,
+            token,
+            &json!({"id":0,"method":"auth","params":{"token":token}}).to_string(),
+        );
+        // `state` with no mesh loaded is an agent-level error: the outer
+        // envelope must be ok:false, not a success wrapping the failure.
+        let (r, close) = handle_line(
+            &mut sess,
+            &ws,
+            &mut authed,
+            &mut idx,
+            token,
+            r#"{"id":1,"method":"step","params":{"step":{"state":{}}}}"#,
+        );
+        assert!(!close);
+        assert_eq!(r["ok"], false, "{r}");
+        assert_eq!(r["result"]["ok"], false, "{r}");
+        assert_eq!(r["result"]["step"], "state", "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("no mesh loaded"),
+            "{r}"
+        );
+        // A successful step keeps the success envelope.
+        let (r, _) = handle_line(
+            &mut sess,
+            &ws,
+            &mut authed,
+            &mut idx,
+            token,
+            r#"{"id":2,"method":"step","params":{"step":{"version":{}}}}"#,
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        // A batch that stops on an agent error is a top-level failure too.
+        let (r, _) = handle_line(
+            &mut sess,
+            &ws,
+            &mut authed,
+            &mut idx,
+            token,
+            r#"{"id":3,"method":"steps","params":{"steps":[{"version":{}},{"state":{}}]}}"#,
+        );
+        assert_eq!(r["ok"], false, "{r}");
+        assert_eq!(r["result"]["completed"], 1, "{r}");
+        assert_eq!(r["result"]["failed"]["index"], 1, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("no mesh loaded"),
+            "{r}"
+        );
     }
 }

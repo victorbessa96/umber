@@ -88,17 +88,71 @@ pub fn token_file(prefix: &str, port: u16) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{port}.token"))
 }
 
-/// Write the token file owner-only (0600 on Unix).
+/// Write the token file owner-only (0600 on Unix), never through a
+/// pre-existing symlink or non-regular path. The token goes into a private
+/// create-new sibling and is renamed atomically; permissions are enforced
+/// after every write, including replacement of a permissive existing file.
 pub fn write_token_file(path: &Path, token: &str) -> Result<()> {
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    fn path_error(path: &Path, error: impl Into<String>) -> ControlError {
+        ControlError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "unsafe control-token path `{}`: {}",
+                path.display(),
+                error.into()
+            ),
+        ))
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(path_error(path, "refusing to follow a symlink"));
+            }
+            if !meta.is_file() {
+                return Err(path_error(path, "not a regular file"));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ControlError::Io(e)),
+    }
+
+    let leaf = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "token".into());
+    let nonce = generate_token()?;
+    let tmp = path.with_file_name(format!(
+        ".{leaf}.{}.{}.tmp",
+        std::process::id(),
+        &nonce[..16]
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
+        options.mode(0o600);
     }
-    o.open(path)?.write_all(token.as_bytes())?;
-    Ok(())
+
+    let result = (|| -> Result<()> {
+        let mut file = options.open(&tmp)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+        // Rust's Windows rename path also replaces an existing file;
+        // never delete the old token before replacement is known to succeed.
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Server-side token for `prefix` on `port`: `UMBER_CONTROL_TOKEN` when
@@ -279,6 +333,36 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_write_refuses_symlink_and_repairs_existing_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("umber-token-safety-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"keep").unwrap();
+        let path = dir.join("control.token");
+        symlink(&victim, &path).unwrap();
+        assert!(write_token_file(&path, "replacement-token").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_token_file(&path, "replacement-token").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement-token");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

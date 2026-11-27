@@ -26,7 +26,11 @@
 //! scans the bundled starter `assets/` plus the per-user library dirs
 //! and replies rows `{path, kind, name, bytes, source}`; `import_asset`
 //! rides `run_step` / `run_steps` with its `file` (read root) and
-//! `library` (write root) paths confined like every file tool.
+//! `library` (write root) paths confined like every file tool. An
+//! `import_asset` with no `library` targets the per-user library dir and
+//! is refused unless that directory resolves inside the write root
+//! (there is no silent unconfined write mode; see
+//! [`crate::workspace::AuthorizedWorkspace::authorize_host_write`]).
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -46,7 +50,7 @@ use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServiceExt};
 
 use crate::agent::Session;
-use crate::workspace::{Access, AuthorizedWorkspace};
+use crate::workspace::AuthorizedWorkspace;
 
 /// The MCP protocol revision this server speaks (pinned: the
 /// `supported_protocol_versions` list holds exactly this one).
@@ -221,9 +225,7 @@ fn run_tool(
             let mut step = args.get("step").cloned().ok_or_else(|| {
                 anyhow!("`step` must be an object, e.g. {{\"bake_status\": {{}}}}")
             })?;
-            let mode = step_mode(&step);
-            ws.confine_step(&mut step, mode)?;
-            confine_import_asset(ws, &mut step)?;
+            ws.confine_step(&mut step)?;
             step
         }
         "run_steps" => {
@@ -241,9 +243,7 @@ fn run_tool(
             let mut results = Vec::new();
             for (i, s) in steps.iter().enumerate() {
                 let mut s = s.clone();
-                let mode = step_mode(&s);
-                ws.confine_step(&mut s, mode)?;
-                confine_import_asset(ws, &mut s)?;
+                ws.confine_step(&mut s)?;
                 let reply = dispatch(sess, s, index);
                 let ok = reply["ok"].as_bool().unwrap_or(false);
                 results.push(reply.clone());
@@ -285,15 +285,13 @@ fn run_tool(
             json!({ "project_save": { "dir": host } })
         }
         "bake" | "export" | "paint_stroke" | "paint_snapshot" | "set_active" | "paint_read" => {
-            // Passthrough: the arguments ARE the step body; confine the
-            // path-bearing fields (out/out_dir write; dir/path by step mode).
+            // Passthrough: the arguments ARE the step body; dispatch the
+            // FULL `{name: body}` envelope so the agent parser sees the
+            // tool's own step name (returning the inner body alone made
+            // `set_active` arrive as `step:"set"`, etc.).
             let mut wrapped = json!({ name: args.clone() });
-            let mode = step_mode(&wrapped);
-            ws.confine_step(&mut wrapped, mode)?;
+            ws.confine_step(&mut wrapped)?;
             wrapped
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow!("internal: step body lost"))?
         }
         "bake_status" => json!({ "bake_status": {} }),
         "command_list" => json!({ "command_list": {} }),
@@ -319,45 +317,6 @@ fn dispatch(sess: &mut Session, step: Value, index: &mut usize) -> Value {
     let (reply, _quit) = sess.reply(*index, &line);
     *index += 1;
     reply
-}
-
-/// Which workspace side a step's ambiguous path keys (`dir`, `path`) mean.
-fn step_mode(step: &Value) -> Access {
-    let name = step
-        .as_object()
-        .and_then(|o| o.keys().next())
-        .cloned()
-        .unwrap_or_default();
-    match name.as_str() {
-        "project_save" | "export" | "bake" | "paint_snapshot" => Access::Write,
-        _ => Access::Read,
-    }
-}
-
-/// Confine an `import_asset` step's path fields — `file` reads, an
-/// explicit `library` writes (`confine_step` only knows the shared key
-/// set). Without roots the step fails closed like every file tool;
-/// an absent `library` keeps K5's per-user library dir default.
-fn confine_import_asset(ws: &AuthorizedWorkspace, step: &mut Value) -> Result<()> {
-    let Some(body) = step
-        .as_object_mut()
-        .and_then(|o| o.get_mut("import_asset"))
-        .and_then(Value::as_object_mut)
-    else {
-        return Ok(());
-    };
-    for (key, access) in [("file", Access::Read), ("library", Access::Write)] {
-        if let Some(v) = body.get_mut(key) {
-            if let Some(s) = v.as_str() {
-                let host = match access {
-                    Access::Read => ws.host_read_path(s)?,
-                    Access::Write => ws.host_write_path(s)?,
-                };
-                *v = Value::String(host.display().to_string());
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The static tool catalog as the exact JSON the pre-rmcp server sent
@@ -627,6 +586,43 @@ mod tests {
             assert_eq!(reply["ok"], true);
             assert_eq!(reply["step"], "version");
             assert_eq!(reply["protocol_version"], 1);
+        });
+    }
+
+    #[test]
+    fn direct_step_tools_dispatch_the_full_envelope() {
+        runtime().block_on(async {
+            let base = scratch("direct-envelope");
+            let ws = AuthorizedWorkspace::new(Some(&base), Some(&base)).unwrap();
+            let mut w = start(ws, no_control()).await;
+            handshake(&mut w).await;
+            let cases = [
+                ("bake", json!({"out_dir": "out", "size": 8, "rays": 1})),
+                (
+                    "export",
+                    json!({"preset": "gltf", "out_dir": "out", "size": 8, "rays": 1}),
+                ),
+                (
+                    "paint_stroke",
+                    json!({"points": [[0.5, 0.5]], "color": [1.0, 1.0, 1.0, 1.0]}),
+                ),
+                ("paint_snapshot", json!({"out": "snapshot.png"})),
+                ("set_active", json!({"set": "main"})),
+                ("paint_read", json!({"texels": [[0, 0]]})),
+            ];
+            for (offset, (name, arguments)) in cases.into_iter().enumerate() {
+                let r = call_tool(&mut w, 20 + offset as i64, name, arguments).await;
+                let (is_error, reply) = result_text(&r);
+                assert!(is_error, "{name}: {reply}");
+                assert_eq!(reply["ok"], false, "{name}: {reply}");
+                assert_eq!(reply["step"], name, "{name}: {reply}");
+                let error = reply["error"].as_str().unwrap_or_default();
+                assert!(
+                    error.contains("no mesh loaded") || error.contains("no project open"),
+                    "{name}: {reply}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(base);
         });
     }
 

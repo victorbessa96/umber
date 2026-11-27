@@ -24,6 +24,22 @@
 //! Roots are trusted launch-time configuration (`--read-root`,
 //! `--write-root`); request paths are untrusted forward-slash relative
 //! paths. A missing authority fails closed: no root, no file access.
+//!
+//! Confinement is VARIANT-AWARE: [`AuthorizedWorkspace::confine_step`]
+//! dispatches on the step name and confines exactly the fields that
+//! variant carries ([`step_path_fields`]), including the reads
+//! (`bake_transfer`'s `low`/`high`, `inspect`'s `mesh`, `import_asset`'s
+//! `file`) and writes (`bake_transfer`/`bake`/`export`/`paint_snapshot`'s
+//! `out_dir`, `import_asset`'s `library`) the earlier shared-key confiner
+//! missed. A new path-bearing step variant MUST be added to that table;
+//! the negative test enumerates every entry.
+//!
+//! `import_asset` without an explicit `library` would write to the
+//! per-user asset library, which is outside every granted root. It is
+//! therefore refused unless that directory resolves inside the write
+//! root ([`AuthorizedWorkspace::authorize_host_write`]); there is no
+//! silent unconfined write mode. A caller that wants the per-user library
+//! grants it as (or below) `--write-root`.
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -179,41 +195,89 @@ impl AuthorizedWorkspace {
 
     /// Rewrite the path-carrying fields of one agent step to confined host
     /// paths, so a `run_step`/`step` client cannot reach outside the roots.
-    /// `mode` governs the ambiguous keys (`dir`, `path`); the unambiguous
-    /// ones are fixed: `mesh`/`in` read, `out`/`out_dir` write.
-    pub fn confine_step(&self, step: &mut Value, mode: Access) -> Result<()> {
+    ///
+    /// The step name selects the field table ([`step_path_fields`]), so a
+    /// variant's reads and writes are confined by identity, never by a
+    /// guessed shared key set. An `import_asset` with no `library` resolves
+    /// the per-user library and requires it to be inside the write root
+    /// (see [`Self::authorize_host_write`]).
+    pub fn confine_step(&self, step: &mut Value) -> Result<()> {
         let Some(obj) = step.as_object_mut() else {
             return Ok(());
         };
-        let Some((_name, body)) = obj.iter_mut().next() else {
+        let Some((name, body)) = obj.iter_mut().next() else {
             return Ok(());
         };
+        let name = name.clone();
         let Some(body) = body.as_object_mut() else {
             return Ok(());
         };
-        let confine = |v: &mut Value, access: Access, ws: &Self| -> Result<()> {
-            if let Some(s) = v.as_str() {
-                let host = ws.confine(s, access)?;
-                *v = Value::String(host.display().to_string());
-            }
-            Ok(())
+        let Some(fields) = step_path_fields(&name) else {
+            return Ok(());
         };
-        for key in ["mesh", "in", "input"] {
-            if let Some(v) = body.get_mut(key) {
-                confine(v, Access::Read, self)?;
+        for (key, access) in fields {
+            if let Some(v) = body.get_mut(*key) {
+                if let Some(s) = v.as_str() {
+                    let host = self.confine(s, *access)?;
+                    *v = Value::String(host.display().to_string());
+                }
             }
         }
-        for key in ["out", "out_dir", "output"] {
-            if let Some(v) = body.get_mut(key) {
-                confine(v, Access::Write, self)?;
-            }
-        }
-        for key in ["dir", "path"] {
-            if let Some(v) = body.get_mut(key) {
-                confine(v, mode, self)?;
-            }
+        if name == "import_asset" {
+            self.confine_import_library(body)?;
         }
         Ok(())
+    }
+
+    /// `import_asset`'s implicit write target: an absent `library` means
+    /// the kind's per-user library dir. That directory is not request
+    /// input, so it is authorized as an absolute HOST write target and
+    /// must resolve inside the write root; the resolved host path is
+    /// written back into the step so the import uses exactly it.
+    fn confine_import_library(&self, body: &mut serde_json::Map<String, Value>) -> Result<()> {
+        if body.get("library").is_some_and(|v| !v.is_null()) {
+            return Ok(());
+        }
+        let Some(kind) = body
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(crate::import_asset::AssetKind::from_name)
+        else {
+            // An absent/unknown kind is refused by the step parser before
+            // any filesystem write, so there is nothing to confine.
+            return Ok(());
+        };
+        let dir = crate::import_asset::default_library_dir(kind).ok_or_else(|| {
+            anyhow!(
+                "import_asset: no per-user library dir for `{kind}`; \
+                 pass `library` inside the write root"
+            )
+        })?;
+        let host = self.authorize_host_write(&dir)?;
+        body.insert("library".into(), Value::String(host.display().to_string()));
+        Ok(())
+    }
+
+    /// Authorize an absolute HOST write target that did not come through
+    /// [`relative_path`] (the per-user asset library). The path must
+    /// resolve inside the write root: existing components are
+    /// canonicalized (so an escaping symlink is refused) and any
+    /// not-yet-created trailing components are appended to the nearest
+    /// existing ancestor. A missing write root fails closed.
+    pub fn authorize_host_write(&self, host: &Path) -> Result<PathBuf> {
+        let Some(root) = self.write_root.as_ref() else {
+            return Err(anyhow!(
+                "file access is not granted: no write root (start the server with --write-root <dir>)"
+            ));
+        };
+        let resolved = canonicalize_existing_prefix(host)?;
+        if !resolved.starts_with(root) {
+            return Err(anyhow!(
+                "path rejected (resolves outside the write root): `{}`",
+                host.display()
+            ));
+        }
+        Ok(resolved)
     }
 
     /// Verify a write target stays inside the sandbox through the `Dir`
@@ -273,6 +337,65 @@ impl AuthorizedWorkspace {
                 }
                 Ok(root.join(&rel))
             }
+        }
+    }
+}
+
+/// The path-bearing fields of one agent step variant and the authority
+/// each needs. Every variant that carries a filesystem path is listed;
+/// a new path-bearing variant MUST be added here or its paths reach the
+/// session unconfined (the negative test enumerates this table).
+fn step_path_fields(name: &str) -> Option<&'static [(&'static str, Access)]> {
+    match name {
+        "load" => Some(&[("mesh", Access::Read)]),
+        "inspect" => Some(&[("mesh", Access::Read)]),
+        "bake" => Some(&[("out_dir", Access::Write)]),
+        "bake_transfer" => Some(&[
+            ("low", Access::Read),
+            ("high", Access::Read),
+            ("out_dir", Access::Write),
+        ]),
+        "export" => Some(&[("out_dir", Access::Write)]),
+        "project_open" => Some(&[("dir", Access::Read)]),
+        "project_save" => Some(&[("dir", Access::Write)]),
+        "paint_snapshot" => Some(&[("out", Access::Write), ("out_dir", Access::Write)]),
+        "import_asset" => Some(&[("file", Access::Read), ("library", Access::Write)]),
+        _ => None,
+    }
+}
+
+/// Canonicalize the longest existing prefix of `path` and append the
+/// components that do not exist yet. Symlinks in the existing prefix are
+/// resolved, so an escaping link is visible to the caller's root check.
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path;
+    loop {
+        match current.canonicalize() {
+            Ok(canonical) => {
+                let mut out = canonical;
+                for part in tail.iter().rev() {
+                    out.push(part);
+                }
+                return Ok(out);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Err(anyhow!(
+                        "cannot resolve `{}`: no existing ancestor",
+                        path.display()
+                    ));
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return Err(anyhow!(
+                        "cannot resolve `{}`: no existing ancestor",
+                        path.display()
+                    ));
+                };
+                current = parent;
+            }
+            Err(e) => return Err(anyhow!("cannot resolve `{}`: {e}", path.display())),
         }
     }
 }
@@ -446,6 +569,9 @@ mod tests {
         assert!(ws.write("link/new.txt", b"x").is_err());
         assert!(ws.host_read_path("link/secret.txt").is_err());
         assert!(ws.host_write_path("link/new.txt").is_err());
+        assert!(ws
+            .authorize_host_write(&inside.join("link/new.txt"))
+            .is_err());
         assert!(ws.list_dir("link").is_err());
         assert!(ws.create_dir_all("link/deeper").is_err());
         assert!(!outside.join("new.txt").exists());
@@ -462,21 +588,157 @@ mod tests {
         assert!(host.ends_with("real.txt"), "resolved inside: {host:?}");
     }
 
+    /// Build a one-variant step object with the given path fields.
+    fn step_value(name: &str, fields: &[(&str, &str)]) -> Value {
+        let body: serde_json::Map<String, Value> = fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect();
+        let mut step = serde_json::Map::new();
+        step.insert(name.to_string(), Value::Object(body));
+        Value::Object(step)
+    }
+
+    #[test]
+    fn confine_step_covers_every_path_bearing_variant() {
+        let (inside, outside, ws) = roots("variants");
+        std::fs::write(inside.join("m.glb"), b"x").unwrap();
+        std::fs::create_dir_all(inside.join("out")).unwrap();
+        let canonical_inside = inside.canonicalize().unwrap();
+
+        let variants: Vec<(&str, Vec<(&str, Access)>)> = vec![
+            ("load", vec![("mesh", Access::Read)]),
+            ("inspect", vec![("mesh", Access::Read)]),
+            ("bake", vec![("out_dir", Access::Write)]),
+            (
+                "bake_transfer",
+                vec![
+                    ("low", Access::Read),
+                    ("high", Access::Read),
+                    ("out_dir", Access::Write),
+                ],
+            ),
+            ("export", vec![("out_dir", Access::Write)]),
+            ("project_open", vec![("dir", Access::Read)]),
+            ("project_save", vec![("dir", Access::Write)]),
+            (
+                "paint_snapshot",
+                vec![("out", Access::Write), ("out_dir", Access::Write)],
+            ),
+            (
+                "import_asset",
+                vec![("file", Access::Read), ("library", Access::Write)],
+            ),
+        ];
+        for (name, fields) in &variants {
+            let registered = step_path_fields(name).expect("variant registered in the confiner");
+            assert_eq!(registered.len(), fields.len(), "{name}");
+            // Every path field refuses an escape on its own.
+            for (key, _) in fields {
+                let mut step = step_value(name, &[(*key, "../outside/x")]);
+                assert!(
+                    ws.confine_step(&mut step).is_err(),
+                    "{name}.{key} escape accepted"
+                );
+            }
+            // Every path field is rewritten to a confined host path.
+            let good: Vec<(&str, &str)> = fields
+                .iter()
+                .map(|(key, access)| {
+                    let value = match access {
+                        Access::Read => "m.glb",
+                        Access::Write => "out/x",
+                    };
+                    (*key, value)
+                })
+                .collect();
+            let mut step = step_value(name, &good);
+            ws.confine_step(&mut step)
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            for (key, _) in fields {
+                let rewritten = step[*name][*key].as_str().expect("rewritten string");
+                assert!(
+                    Path::new(rewritten).starts_with(&canonical_inside),
+                    "{name}.{key}: {rewritten}"
+                );
+            }
+        }
+        let _ = outside;
+    }
+
+    #[test]
+    fn host_write_authorization_requires_inside_the_root() {
+        let (inside, outside, ws) = roots("hostwrite");
+        std::fs::create_dir_all(inside.join("lib")).unwrap();
+        let ok = ws
+            .authorize_host_write(&inside.join("lib/new.umberbrush"))
+            .unwrap();
+        assert!(ok.starts_with(inside.canonicalize().unwrap()), "{ok:?}");
+        assert!(ws.authorize_host_write(&outside.join("lib")).is_err());
+        let none = AuthorizedWorkspace::default();
+        assert!(none.authorize_host_write(&inside.join("lib")).is_err());
+    }
+
+    #[test]
+    fn import_asset_without_library_requires_write_authority() {
+        let _guard = crate::agent::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        let old_appdata = std::env::var_os("APPDATA");
+        let (inside, outside, ws) = roots("defaultlib");
+        std::fs::write(inside.join("m.umberbrush"), b"brush").unwrap();
+        let step = || {
+            step_value(
+                "import_asset",
+                &[("file", "m.umberbrush"), ("kind", "brush")],
+            )
+        };
+
+        std::env::set_var("XDG_DATA_HOME", &outside);
+        std::env::set_var("APPDATA", &outside);
+        let error = ws.confine_step(&mut step()).unwrap_err().to_string();
+        assert!(
+            error.contains("outside the write root"),
+            "expected default-library write refusal, got: {error}"
+        );
+
+        std::env::set_var("XDG_DATA_HOME", &inside);
+        std::env::set_var("APPDATA", &inside);
+        let mut allowed = step();
+        ws.confine_step(&mut allowed).unwrap();
+        let library = allowed["import_asset"]["library"].as_str().unwrap();
+        assert!(
+            Path::new(library).starts_with(inside.canonicalize().unwrap()),
+            "resolved default library escaped the write root: {library}"
+        );
+        assert!(library.ends_with("brushes"), "{library}");
+
+        match old_xdg {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match old_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+    }
+
     #[test]
     fn confine_step_rewrites_path_fields_to_confined_host_paths() {
         let (inside, outside, ws) = roots("step");
         std::fs::write(inside.join("m.glb"), b"x").unwrap();
         let mut step = serde_json::json!({"load": {"mesh": "m.glb"}});
-        ws.confine_step(&mut step, Access::Read).unwrap();
+        ws.confine_step(&mut step).unwrap();
         let mesh = step["load"]["mesh"].as_str().unwrap();
         assert!(
             mesh.starts_with(&*inside.canonicalize().unwrap().to_string_lossy()),
             "{mesh}"
         );
         let mut bad = serde_json::json!({"load": {"mesh": "../outside/m.glb"}});
-        assert!(ws.confine_step(&mut bad, Access::Read).is_err());
+        assert!(ws.confine_step(&mut bad).is_err());
         let mut out = serde_json::json!({"export": {"out_dir": "../outside"}});
-        assert!(ws.confine_step(&mut out, Access::Write).is_err());
+        assert!(ws.confine_step(&mut out).is_err());
         let _ = outside;
     }
 }

@@ -2403,24 +2403,38 @@ fn envelope(index: usize, step: Option<String>, outcome: Result<Fields>) -> Valu
     Value::Object(map)
 }
 
-/// One request over the live app's `--control` channel: connect to the
-/// loopback endpoint, send the auth line, read its reply, then send the
-/// request and read its reply. The app's `{"ok": true, "result": ...}`
-/// becomes the step's result fields; `{"ok": false, "error": ...}`
-/// becomes the step's typed error. Every wire failure (refused, EOF,
-/// timeout, malformed JSON) is a typed error — this never panics.
+/// Socket deadline for one app-control method. `command.run` owns long
+/// bake/export jobs and shares the server's 30-minute ceiling plus grace;
+/// every other request keeps the original 30-second bound.
+fn control_timeout(method: &str) -> std::time::Duration {
+    if method == "command.run" {
+        std::time::Duration::from_secs(30 * 60 + 30)
+    } else {
+        std::time::Duration::from_secs(30)
+    }
+}
+
+/// One request over the live app's `--control` channel, with the
+/// method-specific deadline. Tests inject deadlines through the helper.
 fn control_call(endpoint: &ControlEndpoint, method: &str, params: &Value) -> Result<Fields> {
+    control_call_with_timeout(endpoint, method, params, control_timeout(method))
+}
+
+/// Connect, authenticate, and send one request. Every wire failure is a
+/// typed error; the injected socket deadline is applied to reads and writes.
+fn control_call_with_timeout(
+    endpoint: &ControlEndpoint,
+    method: &str,
+    params: &Value,
+    timeout: std::time::Duration,
+) -> Result<Fields> {
     use std::net::{Ipv4Addr, TcpStream};
-    use std::time::Duration;
     let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port)).map_err(|e| {
         anyhow::anyhow!(
             "control channel 127.0.0.1:{} unreachable: {e}",
             endpoint.port
         )
     })?;
-    // The app's UI-thread queue can take up to its 30 s reply timeout;
-    // bound the wait the same way, so a hung app is a typed error.
-    let timeout = Duration::from_secs(30);
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
@@ -3385,6 +3399,50 @@ mod tests {
         assert_eq!(reply["step"], "command_run", "{reply}");
         assert_eq!(reply["ran"], "view.toggle_grid", "{reply}");
         assert_eq!(reply["enabled"], true, "{reply}");
+    }
+
+    #[test]
+    fn command_run_uses_the_long_job_reply_window() {
+        assert_eq!(control_timeout("command.run").as_secs(), 30 * 60 + 30);
+        assert_eq!(control_timeout("command.list").as_secs(), 30);
+        let token = "0123456789abcdef0123456789abcdef";
+        let params = serde_json::json!({"id": "view.toggle_grid"});
+        let response = |req: &Value| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            serde_json::json!({
+                "id": req["id"],
+                "ok": true,
+                "result": {"ran": req["params"]["id"], "enabled": true}
+            })
+        };
+
+        let (port, _rx, _server) = mock_control_server(token, response);
+        let endpoint = ControlEndpoint {
+            port,
+            token: token.to_string(),
+        };
+        assert!(control_call_with_timeout(
+            &endpoint,
+            "command.run",
+            &params,
+            std::time::Duration::from_millis(20),
+        )
+        .is_err());
+
+        let (port, _rx, server) = mock_control_server(token, response);
+        let endpoint = ControlEndpoint {
+            port,
+            token: token.to_string(),
+        };
+        let result = control_call_with_timeout(
+            &endpoint,
+            "command.run",
+            &params,
+            std::time::Duration::from_secs(1),
+        )
+        .expect("the delayed reply arrives inside the injected deadline");
+        server.join().unwrap();
+        assert_eq!(result["ran"], "view.toggle_grid");
     }
 
     #[test]

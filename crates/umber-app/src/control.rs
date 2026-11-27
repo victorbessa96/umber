@@ -607,6 +607,9 @@ struct BridgeState {
     child: Option<std::process::Child>,
     /// The live client connection the child's stdout pumps into.
     out: Option<TcpStream>,
+    /// Monotonic ownership token. Pump cleanup may mutate shared state only
+    /// while its connection's generation is still current.
+    generation: u64,
 }
 
 fn bridge_accept_loop(listener: TcpListener, token: String, state: Arc<Mutex<BridgeState>>) {
@@ -672,6 +675,39 @@ fn spawn_mcp_child(control: Option<&BridgeControl>) -> std::io::Result<std::proc
     mcp_child_command(control).spawn()
 }
 
+/// Reap this session's child once. Shared client state is released only if
+/// `generation` still owns the bridge; a stale pump can never close or clear
+/// a newer client's stream. Shutdown wakes the other pump blocked on socket IO.
+fn bridge_cleanup(
+    state: &Arc<Mutex<BridgeState>>,
+    child: &Arc<Mutex<Option<std::process::Child>>>,
+    generation: u64,
+) -> Option<std::process::ExitStatus> {
+    let status = child.lock().unwrap().take().and_then(|mut child| {
+        let _ = child.kill();
+        child.wait().ok()
+    });
+    let mut guard = state.lock().unwrap();
+    if guard.generation != generation {
+        return status;
+    }
+    guard.child = None;
+    if let Some(out) = guard.out.take() {
+        let _ = out.shutdown(std::net::Shutdown::Both);
+    }
+    status
+}
+
+/// The client stream only while `generation` owns the bridge. Older child
+/// output must never cross into a newer client's session.
+fn live_bridge_out(state: &mut BridgeState, generation: u64) -> Option<&mut TcpStream> {
+    if state.generation == generation {
+        state.out.as_mut()
+    } else {
+        None
+    }
+}
+
 fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
     let state_control = state.lock().unwrap().control.clone();
     let _ = stream.set_nodelay(true);
@@ -720,12 +756,17 @@ fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
             return;
         }
     };
+    guard.generation = guard.generation.wrapping_add(1);
+    let generation = guard.generation;
     guard.out = Some(writer.try_clone().expect("writer clones"));
     drop(guard);
+
+    let child_owner = Arc::new(Mutex::new(Some(child)));
 
     // Pump client -> child stdin, verbatim bytes (MCP frames are
     // newline-delimited JSON; the app never interprets them).
     let state_in = Arc::clone(&state);
+    let child_in = Arc::clone(&child_owner);
     let pump_in = std::thread::Builder::new()
         .name("umber-bridge-in".into())
         .spawn(move || {
@@ -745,12 +786,7 @@ fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
                     Ok(LineRead::Eof) | Err(_) => break,
                 }
             }
-            let _ = child.kill();
-            let _ = child.wait();
-            // The bridge is free again: the next client respawns the child.
-            let mut g = state_in.lock().unwrap();
-            g.child = None;
-            g.out = None;
+            bridge_cleanup(&state_in, &child_in, generation);
         });
     // Pump child stdout -> client, verbatim bytes.
     let state_out = Arc::clone(&state);
@@ -763,7 +799,7 @@ fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
                 match control::read_bounded_line(&mut reader, &mut line) {
                     Ok(LineRead::Line) => {
                         let mut g = state_out.lock().unwrap();
-                        match g.out.as_mut() {
+                        match live_bridge_out(&mut g, generation) {
                             Some(out) => {
                                 if out
                                     .write_all(line.as_bytes())
@@ -780,6 +816,7 @@ fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
                     Ok(LineRead::Eof) | Err(_) => break,
                 }
             }
+            bridge_cleanup(&state_out, &child_owner, generation);
         });
     // The pumps own their halves; dropping the JoinHandles detaches them.
     drop(pump_in);
@@ -1063,6 +1100,87 @@ mod tests {
         );
         assert_eq!(replies[0]["ok"], false);
         assert_eq!(replies[0]["error"], "unauthorized");
+    }
+
+    fn portable_child() -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--version")
+            .spawn()
+            .unwrap()
+    }
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn bridge_cleanup_reaps_child_and_releases_client() {
+        let owner = Arc::new(Mutex::new(Some(portable_child())));
+        let (client, server) = tcp_pair();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let state = Arc::new(Mutex::new(BridgeState {
+            control: None,
+            child: None,
+            out: Some(server),
+            generation: 1,
+        }));
+
+        let status = bridge_cleanup(&state, &owner, 1);
+        assert!(status.is_some(), "wait must reap the child");
+        assert!(owner.lock().unwrap().is_none());
+        assert!(state.lock().unwrap().out.is_none());
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+    }
+
+    #[test]
+    fn stale_bridge_cleanup_cannot_close_a_newer_client() {
+        let (old_client, old_server) = tcp_pair();
+        let state = Arc::new(Mutex::new(BridgeState {
+            control: None,
+            child: None,
+            out: Some(old_server),
+            generation: 1,
+        }));
+        let old_owner = Arc::new(Mutex::new(Some(portable_child())));
+        assert!(bridge_cleanup(&state, &old_owner, 1).is_some());
+        drop(old_client);
+
+        let (new_client, new_server) = tcp_pair();
+        new_client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        {
+            let mut guard = state.lock().unwrap();
+            guard.out = Some(new_server);
+            guard.generation = 2;
+        }
+
+        let stale_owner = Arc::new(Mutex::new(Some(portable_child())));
+        assert!(bridge_cleanup(&state, &stale_owner, 1).is_some());
+        {
+            let mut guard = state.lock().unwrap();
+            assert!(guard.out.is_some());
+            assert!(live_bridge_out(&mut guard, 1).is_none());
+            assert!(live_bridge_out(&mut guard, 2).is_some());
+        }
+        let mut reader = BufReader::new(new_client);
+        let mut line = String::new();
+        let error = reader.read_line(&mut line).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+
+        let current_owner = Arc::new(Mutex::new(None));
+        assert!(bridge_cleanup(&state, &current_owner, 2).is_none());
+        assert!(state.lock().unwrap().out.is_none());
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
     }
 
     #[test]
