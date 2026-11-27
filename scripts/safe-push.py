@@ -25,12 +25,14 @@ rust-toolchain.toml / .cargo change means every crate, `assets/` means
 umber-core, umber-cli, umber-gui, and umber-app, a docs-only or scripts/.github-only range means none (the
 cargo gates are skipped and say so). An unknown path fails closed (every
 crate). Cargo runs under the shared `flock /tmp/umber-cargo.lock nice -n
-19` with the tree's own target dir (warm cache), CARGO_BUILD_JOBS=3,
-debug info off.
+19` with a persistent per-repo gate target (warm cache, isolated from the
+main checkout), CARGO_BUILD_JOBS=3, debug info off.
 
-The gates run on a throwaway worktree of the exact commit being pushed,
-never on the shared working tree (a sibling's uncommitted WIP neither
-fails nor passes them). HEAD is resolved to a SHA once, and that SHA is
+The gates run on a per-repo worktree of the exact commit being pushed,
+recreated under an exclusive lock for each run, never on the shared
+working tree (a sibling's uncommitted WIP neither fails nor passes them).
+Its stable path keeps compile-time manifest paths valid for the separate
+persistent target. HEAD is resolved to a SHA once, and that SHA is
 what gets pushed, so a sibling commit landing mid-check never rides.
 
 A commit rebased onto a newer origin/master gets a new hash; it still
@@ -54,8 +56,10 @@ Exit codes: 0 pushed (or dry-run clean), 2 refused, 3 git/push error.
 """
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -273,6 +277,62 @@ def cargo_cmd(*args):
     return [*pre, "cargo", *args]
 
 
+def lock_file(handle):
+    """Hold an OS-owned gate lock; process death releases it."""
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def unlock_file(handle):
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_gate(root, head):
+    """Create the stable per-repo gate worktree under its exclusive lock.
+
+    The target is a sibling of the worktree, not the main checkout's target.
+    Recreating the same worktree path keeps env!("CARGO_MANIFEST_DIR")
+    artifacts valid across runs while preserving the warm isolated cache.
+    """
+    scratch = os.environ.get("TMPDIR") or tempfile.gettempdir()
+    key = hashlib.sha256(os.path.realpath(root).encode("utf-8")).hexdigest()[:16]
+    base = os.path.join(scratch, f"umber-safe-push-{key}")
+    os.makedirs(base, exist_ok=True)
+    handle = open(os.path.join(scratch, f"umber-safe-push-{key}.lock"), "a+b")
+    tree = os.path.join(base, "tree")
+    try:
+        lock_file(handle)
+        # A killed prior run may have left the worktree behind. Its target is
+        # outside the tree, so removing and recreating it preserves the cache.
+        sh(root, "git", "worktree", "remove", "--force", tree)
+        shutil.rmtree(tree, ignore_errors=True)
+        sh(root, "git", "worktree", "add", "-q", "--detach", tree, head, check=True)
+        return tree, os.path.join(base, "target"), handle
+    except BaseException:
+        unlock_file(handle)
+        handle.close()
+        raise
+
+
 def check_gate(root, rule, cmd, ok, fix):
     r = sh(root, *cmd)
     out = r.stdout + r.stderr
@@ -294,6 +354,7 @@ def main() -> int:
     upstream = f"{args.remote}/{args.branch}"
     head = sh(root, "git", "rev-parse", "HEAD", check=True).stdout.strip()
     gate_tree = None
+    gate_lock = None
     try:
         sessions = sessions_from(args)
         if not args.no_fetch:
@@ -301,10 +362,7 @@ def main() -> int:
         commits = check_ledger(root, upstream, sessions, head)
         check_ff(root, upstream, head)
         # The gates read the pushed commit's own tree, not the shared one.
-        scratch = os.environ.get("TMPDIR") or None
-        gate_tree = tempfile.mkdtemp(prefix="safe-push-", dir=scratch)
-        os.rmdir(gate_tree)
-        sh(root, "git", "worktree", "add", "-q", "--detach", gate_tree, head, check=True)
+        gate_tree, gate_target, gate_lock = acquire_gate(root, head)
         check_gate(
             gate_tree,
             "fmt",
@@ -343,8 +401,7 @@ def main() -> int:
             # env!("CARGO_MANIFEST_DIR") would otherwise leave deleted gate
             # paths in artifacts later reused by the real checkout.
             ENV.update(
-                CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR")
-                or os.path.join(gate_tree, "target"),
+                CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR") or gate_target,
                 CARGO_BUILD_JOBS=os.environ.get("CARGO_BUILD_JOBS", "3"),
                 CARGO_PROFILE_TEST_DEBUG="0",
                 CARGO_PROFILE_DEV_DEBUG="0",
@@ -371,6 +428,9 @@ def main() -> int:
     finally:
         if gate_tree:
             sh(root, "git", "worktree", "remove", "--force", gate_tree)
+        if gate_lock is not None:
+            unlock_file(gate_lock)
+            gate_lock.close()
 
     print(f"safe-push: {len(commits)} commit(s) clear all gates: " + " ".join(c[:8] for c in commits))
     if args.dry_run:

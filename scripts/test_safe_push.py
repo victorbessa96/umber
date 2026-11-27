@@ -400,10 +400,15 @@ def gate_target_is_isolated_from_the_main_repo():
             raise AssertionError("cargo gate did not record CARGO_TARGET_DIR")
         parts = target.split(os.sep)
         expect(
-            len(parts) >= 2
-            and parts[-1] == "target"
-            and parts[-2].startswith("safe-push-"),
-            f"gate target must be <temporary worktree>/target, got {target!r}",
+            len(parts) >= 2 and parts[-1] == "target" and "safe-push-" in parts[-2],
+            f"gate target must be isolated from the main repo, got {target!r}",
+        )
+        r.commit("crates/umber-gui/src/y.rs", ME)
+        code, out = r.guard()
+        expect(code == 0, f"second exit {code}: {out}")
+        expect(
+            r.cargo_target_dir() == target,
+            f"isolated target changed between runs: {target!r} -> {r.cargo_target_dir()!r}",
         )
     finally:
         r.close()
