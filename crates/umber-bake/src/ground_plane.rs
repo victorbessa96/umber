@@ -741,66 +741,112 @@ fn try_bake_2d_fallback(
     }
     queue.submit(Some(encoder.finish()));
 
-    // Read back the layers
+    // Read back the layers. WARP can need longer than ten seconds even for
+    // small targets; a hard timeout here used to panic, then panic again in
+    // the map callback during unwinding and abort the whole application.
     let mut outputs = BakeOutputs::default();
+    if let Some(tex) = ao_texture {
+        outputs.ao = Some(read_back_rgba8(device, queue, &tex, width, height)?);
+    }
+    if let Some(tex) = height_texture {
+        outputs.height = Some(read_back_rgba8(device, queue, &tex, width, height)?);
+    }
+    if let Some(tex) = id_texture {
+        outputs.id = Some(read_back_rgba8(device, queue, &tex, width, height)?);
+    }
 
-    let read_texture = |texture: &wgpu::Texture| -> Result<Vec<u8>, GroundPlaneBakeError> {
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("umber_bake_ground_plane_staging"),
-            size: (width * height * 4) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+    Ok(outputs)
+}
+
+/// GPU copy rows are 256-byte aligned. The returned CPU bytes are tightly
+/// packed RGBA8 and read in bands no larger than the device buffer limit.
+fn padded_readback_row(width: u32) -> u32 {
+    let unpadded = width * 4;
+    unpadded + (256 - (unpadded % 256)) % 256
+}
+
+fn read_back_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, GroundPlaneBakeError> {
+    let unpadded_row = width * 4;
+    let padded_row = padded_readback_row(width);
+    let band_rows = crate::position::readback_rows_per_band(
+        padded_row,
+        height,
+        device.limits().max_buffer_size,
+    );
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("umber_bake_ground_plane_readback"),
+        size: u64::from(padded_row) * u64::from(band_rows),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+    let mut band_start = 0;
+    while band_start < height {
+        let rows = band_rows.min(height - band_start);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("umber_bake_ground_plane_copy"),
+            label: Some("umber_bake_ground_plane_readback_encoder"),
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: band_start,
+                    z: 0,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &staging_buffer,
+                buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(rows),
                 },
             },
             wgpu::Extent3d {
                 width,
-                height,
+                height: rows,
                 depth_or_array_layers: 1,
             },
         );
         queue.submit(Some(encoder.finish()));
-        let slice = staging_buffer.slice(..);
+
+        let slice = buffer.slice(..u64::from(padded_row) * u64::from(rows));
         let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| sender.send(r).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
         device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
-                timeout: Some(std::time::Duration::from_secs(10)),
+                timeout: None,
             })
-            .expect("poll timeout");
-        receiver.recv().unwrap().expect("map failed");
-        let data = slice.get_mapped_range().expect("get mapped range");
-        Ok(data.to_vec())
-    };
-
-    if let Some(tex) = ao_texture {
-        outputs.ao = Some(read_texture(&tex)?);
+            .map_err(|e| GroundPlaneBakeError::Readback(format!("device poll: {e}")))?;
+        receiver
+            .recv()
+            .map_err(|_| GroundPlaneBakeError::Readback("map callback channel closed".into()))?
+            .map_err(|e| GroundPlaneBakeError::Readback(format!("buffer map: {e}")))?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| GroundPlaneBakeError::Readback(format!("mapped range: {e}")))?;
+        for row in 0..rows as usize {
+            let start = row * padded_row as usize;
+            out.extend_from_slice(&data[start..start + unpadded_row as usize]);
+        }
+        drop(data);
+        buffer.unmap();
+        band_start += rows;
     }
-    if let Some(tex) = height_texture {
-        outputs.height = Some(read_texture(&tex)?);
-    }
-    if let Some(tex) = id_texture {
-        outputs.id = Some(read_texture(&tex)?);
-    }
-
-    Ok(outputs)
+    Ok(out)
 }
 
 #[cfg(all(test, feature = "gpu"))]
@@ -1221,6 +1267,15 @@ mod tests {
             height_offset: 0.1,
             subdivisions: 2,
         }
+    }
+
+    #[test]
+    fn readback_rows_are_aligned_and_banded() {
+        assert_eq!(padded_readback_row(1), 256);
+        assert_eq!(padded_readback_row(64), 256);
+        assert_eq!(padded_readback_row(65), 512);
+        assert_eq!(crate::position::readback_rows_per_band(512, 10, 1024), 2);
+        assert_eq!(crate::position::readback_rows_per_band(512, 1, 128), 1);
     }
 
     #[test]
