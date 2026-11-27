@@ -2,7 +2,8 @@
 
 - Lock: `razul-d3d5-warp-crash`.
 - Brief: `4bb6adc65763` (`docs(bake): D3-D5 WARP crash isolation brief`).
-- Outcome: the Windows abort is root-caused and the readback is repaired without skipping or weakening the oracle.
+- Outcome: the Windows abort is root-caused, the readback is repaired, and both the isolated GroundPlane and original D3-D5 oracles are GREEN on Windows without skipping or weakening them.
+- Fix commit: `e49322ea0967` (`fix(bake): survive slow GroundPlane readbacks`).
 
 ## RED evidence and root cause
 
@@ -36,9 +37,14 @@ A pure regression covers row alignment and band sizing. Three real worker regres
 - Clean-rebuilt `cargo test -p umber-app -- --test-threads=1`: **930 bin tests plus all integration targets passed, 0 failed**.
 - Standard and `gpu`-feature clippy for `umber-bake`/`umber-app`: clean.
 - Rustfmt, scorecard (**3,334**), layers, and parity: clean.
-- `safe-push` cache contamination found during verification was fixed separately at `59849861`; its regression suite is **18/18**.
+- `safe-push` cache contamination found during verification was fixed at `59849861` and `203e760c`; its regression suite is **18/18**, with stable isolated targets across runs.
 - Independent review was not obtained for this final readback patch. Do not relabel the older unrelated GPU-parity SHIP as review of this fix.
-- Windows RED-to-GREEN confirmation and current-tip CI: pending.
+
+## Windows RED-to-GREEN
+
+- `46042480948` at `e49322ea`: `worker_ground_plane_only_smoke` really executes and passes **1/1 in 25.74 seconds** on Windows; Ubuntu and the full matrix are green.
+- `46044621856` at `203e760c`: the original `d3_d5_maps_execute_through_app_worker` really executes and passes **1/1 in 408.31 seconds** on Windows; Ubuntu, Windows release smoke, and the complete targeted matrix are green.
+- `46047753773` at `203e760c`: full unfiltered CI matrix dispatched, currently pending.
 
 ## Non-goals
 
