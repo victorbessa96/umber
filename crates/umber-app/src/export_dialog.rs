@@ -1030,7 +1030,6 @@ impl ExportDialog {
             }
         };
         let pad_hook: umber_export::DilateHook<'_> = &pad_hook;
-        let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
         let mut written = Vec::new();
         for (set_name, group_tiles) in &groups {
             let group_tile_names = obj_tile_names(group_tiles);
@@ -1079,29 +1078,45 @@ impl ExportDialog {
                     written.extend([obj, mtl]);
                 }
             }
-        }
-        if filtered.usda {
-            // The `.usda` carries the whole mesh (per-tile splits stay a
-            // bake-window concern); only its texture references are
-            // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
-            let textures = umber_export::usd::usd_textures(&filtered, |output| {
-                umber_export::usd::usda_file_for_output(output, &sources, tile_names)
-            });
-            let mesh_view = umber_export::usd::UsdMeshView {
-                positions: &mesh.positions,
-                normals: &mesh.normals,
-                uvs: &mesh.uvs,
-                indices: &mesh.indices,
-            };
-            written.push(
-                umber_export::usd::write_usda(
-                    &self.output_dir,
-                    &texture_set,
-                    &mesh_view,
-                    &textures,
-                )
-                .context("write_usda")?,
-            );
+            if filtered.usda {
+                // One concrete document per tile. A lone 1001 keeps the
+                // original `<set>.usda`; tiled runs use `<set>_<tile>.usda`
+                // and a concrete tile number, never a dangling `<UDIM>` reference.
+                for &tile in group_tiles {
+                    let udim = tile.to_string();
+                    let tile_sources = umber_export::TokenSources {
+                        udim: &udim,
+                        ..group_sources
+                    };
+                    let textures = umber_export::usd::usd_textures(&filtered, |output| {
+                        umber_export::obj::obj_file_for_output(
+                            output,
+                            &tile_sources,
+                            group_tile_names.then_some(tile),
+                        )
+                    });
+                    let mesh_view = umber_export::usd::UsdMeshView {
+                        positions: &mesh.positions,
+                        normals: &mesh.normals,
+                        uvs: &mesh.uvs,
+                        indices: &mesh.indices,
+                    };
+                    let asset = if group_tile_names {
+                        format!("{}_{tile}", group_sources.texture_set)
+                    } else {
+                        group_sources.texture_set.to_string()
+                    };
+                    written.push(
+                        umber_export::usd::write_usda(
+                            &self.output_dir,
+                            &asset,
+                            &mesh_view,
+                            &textures,
+                        )
+                        .with_context(|| format!("write_usda ({asset})"))?,
+                    );
+                }
+            }
         }
         let write_ms = write_started.elapsed().as_millis();
 
@@ -1936,5 +1951,116 @@ mod tests {
         );
         let s = map.source(3, 0).expect("padded within the distance cap");
         assert_ne!(s, (3, 0), "uncovered texel takes another texel's value");
+    }
+
+    #[test]
+    fn multi_set_usda_references_the_files_each_group_wrote() {
+        let mut d = dialog();
+        d.size = 8;
+        d.set_usda(true);
+        let out =
+            std::env::temp_dir().join(format!("umber-export-multiset-usda-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        d.set_output_dir(out.clone());
+        let mesh = umber_mesh::MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [3.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs: vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 1.0],
+                [1.0, 1.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec!["Body".into(), "Hilt".into()],
+            triangle_materials: vec![0, 0, 1, 1],
+        };
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("real multi-set USDA export requires a wgpu adapter");
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        assert!(adapter.features().contains(features));
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .expect("device");
+        let gpu = umber_gpu::GpuContext::new(
+            adapter,
+            device,
+            queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        );
+        let mut paint = umber_paint::paint_state::PaintState::with_target_size(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            8,
+        )
+        .expect("paint state");
+        paint.set_active_set("Body");
+        paint.assign_tile_to_set(1001, "Body");
+        assert!(paint.ensure_channel(1001, umber_paint::paint_state::BASE_COLOR_CHANNEL));
+        paint.resize_set("Hilt", 8, 8);
+        paint.assign_tile_to_set(1002, "Hilt");
+        assert!(paint.ensure_channel(1002, umber_paint::paint_state::BASE_COLOR_CHANNEL));
+        assert_eq!(paint.set_of_tile(1001), "Body");
+        assert_eq!(paint.set_of_tile(1002), "Hilt");
+
+        d.export_now(ExportContext {
+            gpu: Some(&gpu),
+            mesh: Some(&mesh),
+            mesh_path: None,
+            paint: Some(&paint),
+            doc: None,
+            graph: None,
+            baked_normal: None,
+        });
+        assert!(!d.last_export_failed(), "export status: {}", d.status());
+        for set in ["Body", "Hilt"] {
+            let doc_name = if set == "Hilt" { "Hilt_1002" } else { set };
+            let doc_path = out.join(format!("{doc_name}.usda"));
+            assert!(doc_path.is_file(), "missing {set} USDA: {doc_path:?}");
+            assert!(d.last_written().contains(&doc_path));
+            let text = std::fs::read_to_string(&doc_path).unwrap();
+            let other = if set == "Body" { "Hilt" } else { "Body" };
+            assert!(
+                text.contains(&format!("{set}_")),
+                "{set} references wrong scope: {text}"
+            );
+            assert!(
+                !text.contains(&format!("{other}_")),
+                "{set} includes {other}: {text}"
+            );
+            let mut refs = 0;
+            for line in text
+                .lines()
+                .filter(|line| line.contains("asset inputs:file = @"))
+            {
+                let file = line
+                    .split(" = @")
+                    .nth(1)
+                    .expect("asset value")
+                    .trim_end_matches('@');
+                assert!(out.join(file).is_file(), "missing referenced file {file}");
+                refs += 1;
+            }
+            assert!(refs > 0, "{set} USDA has no texture references");
+        }
+        let _ = std::fs::remove_dir_all(out);
     }
 }
