@@ -506,7 +506,7 @@ pub fn write_usda(
             cap: MAX_USDA_EXPORT_BYTES,
         });
     }
-    let path = out_dir.join(format!("{asset}.usda"));
+    let path = crate::driver::document_output_path(out_dir, asset, "usda")?;
     std::fs::write(&path, doc).map_err(|e| ExportError::Write(e.to_string()))?;
     Ok(path)
 }
@@ -874,5 +874,40 @@ mod tests {
         assert_eq!(back.normals, vec![[0.0, 0.0, 1.0]; 6]);
         assert_eq!(back.indices, vec![0, 1, 2, 3, 4, 5]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn usda_document_filename_cannot_escape_out_dir() {
+        let (positions, normals, uvs, indices) = quad();
+        let view = quad_view(&positions, &normals, &uvs, &indices);
+        let dir =
+            std::env::temp_dir().join(format!("umber-usda-containment-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let escaped = dir.parent().unwrap().join("escape.usda");
+        let _ = std::fs::remove_file(&escaped);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (hostile, expected) in [
+            ("../escape", ".._escape.usda"),
+            ("/tmp/escape", "_tmp_escape.usda"),
+            ("..", "__.usda"),
+            ("a/b\\c", "a_b_c.usda"),
+        ] {
+            let path = write_usda(&dir, hostile, &view, &[]).unwrap();
+            assert_eq!(path.parent().unwrap(), dir);
+            assert_eq!(path.file_name().unwrap(), expected);
+        }
+        assert!(!escaped.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = dir.parent().unwrap().join("umber-usda-outside.txt");
+            std::fs::write(&outside, b"keep").unwrap();
+            symlink(&outside, dir.join("Body.usda")).unwrap();
+            assert!(write_usda(&dir, "Body", &view, &[]).is_err());
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+            let _ = std::fs::remove_file(outside);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

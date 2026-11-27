@@ -654,9 +654,28 @@ fn materialx_document(
     to_mtlx_document(texture_set, surface, &textures)
 }
 
+/// Resolve one document filename without allowing separators or a
+/// pre-existing symlink to redirect the write outside `out_dir`.
+pub(crate) fn document_output_path(
+    out_dir: &Path,
+    stem: &str,
+    extension: &str,
+) -> Result<PathBuf, ExportError> {
+    let path = out_dir.join(format!("{}.{}", crate::path_safe_value(stem), extension));
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(ExportError::Write(format!(
+                "refusing non-regular document output: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
+}
+
 /// Writes `<textureSet>.mtlx` under `out_dir`, returning its path.
 fn write_materialx(out_dir: &Path, texture_set: &str, doc: &str) -> Result<PathBuf, ExportError> {
-    let path = out_dir.join(format!("{texture_set}.mtlx"));
+    let path = document_output_path(out_dir, texture_set, "mtlx")?;
     std::fs::write(&path, doc).map_err(|e| ExportError::Write(e.to_string()))?;
     Ok(path)
 }
@@ -1890,5 +1909,38 @@ mod tests {
             "no-hook runs must be byte-identical"
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn materialx_document_filename_cannot_escape_out_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("umber-mtlx-containment-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let escaped = dir.parent().unwrap().join("escape.mtlx");
+        let _ = std::fs::remove_file(&escaped);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (hostile, expected) in [
+            ("../escape", ".._escape.mtlx"),
+            ("/tmp/escape", "_tmp_escape.mtlx"),
+            ("..", "__.mtlx"),
+            ("a/b\\c", "a_b_c.mtlx"),
+        ] {
+            let path = write_materialx(&dir, hostile, "doc").unwrap();
+            assert_eq!(path.parent().unwrap(), dir);
+            assert_eq!(path.file_name().unwrap(), expected);
+        }
+        assert!(!escaped.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = dir.parent().unwrap().join("umber-mtlx-outside.txt");
+            std::fs::write(&outside, b"keep").unwrap();
+            symlink(&outside, dir.join("Body.mtlx")).unwrap();
+            assert!(write_materialx(&dir, "Body", "replacement").is_err());
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+            let _ = std::fs::remove_file(outside);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

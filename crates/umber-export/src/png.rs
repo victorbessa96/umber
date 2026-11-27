@@ -301,8 +301,11 @@ pub fn write_png16(
             px[2] = linear_to_srgb_u16(px[2]);
         }
     }
-    // png crate takes 16-bit data as native-endian u8 pairs.
-    let bytes: Vec<u8> = bytemuck::cast_slice(&data).to_vec();
+    // PNG's 16-bit wire order is big-endian on every host.
+    let bytes: Vec<u8> = data
+        .iter()
+        .flat_map(|sample| sample.to_be_bytes())
+        .collect();
     writer
         .write_image_data(&bytes)
         .map_err(|e| PngError::Encode(e.to_string()))?;
@@ -375,11 +378,14 @@ mod tests {
         // Byte length: 2x2 texels * 4 channels * 2 bytes.
         let mut bytes = vec![0u8; reader.output_buffer_size()];
         let _ = reader.next_frame(&mut bytes).unwrap();
-        // First texel's red reads back as the same u16 (little-endian
-        // native order on this platform).
-        let r0 = u16::from_le_bytes([bytes[0], bytes[1]]);
+        // PNG wire order is big-endian on every host, never native endian.
+        assert_eq!(
+            &bytes[..8],
+            &[0x00, 0x00, 0x27, 0x10, 0x4e, 0x20, 0xff, 0xff]
+        );
+        let r0 = u16::from_be_bytes([bytes[0], bytes[1]]);
         assert_eq!(r0, 0);
-        let g0 = u16::from_le_bytes([bytes[2], bytes[3]]);
+        let g0 = u16::from_be_bytes([bytes[2], bytes[3]]);
         assert_eq!(g0, 10_000);
         let _ = std::fs::remove_file(&path);
     }
