@@ -200,6 +200,7 @@ pub fn filter_satisfiable(
             materialx: preset.materialx,
             usda: preset.usda,
             obj_mtl: preset.obj_mtl,
+            psd: preset.psd,
         },
         skipped,
     )
@@ -394,6 +395,16 @@ pub fn tile_set_groups(
     groups
 }
 
+/// One texture-set group's resolved write plan: its token sources, the
+/// tiles' map sets, and whether its names carry a tile suffix. Built once
+/// so the whole-run preflight and the write loop see identical inputs.
+struct GroupPlan<'a> {
+    sources: umber_export::TokenSources<'a>,
+    pairs: Vec<(u16, &'a umber_export::MapSet)>,
+    tiles: &'a [u16],
+    tile_names: bool,
+}
+
 /// One finished export's outcome: what was written, what was skipped,
 /// and phase timings for the status line.
 struct ExportOutcome {
@@ -459,6 +470,8 @@ pub struct ExportDialog {
     usda: bool,
     /// Also write OBJ + MTL with passthrough material/texture references.
     obj_mtl: bool,
+    /// Also write one layered PSD document per map set.
+    psd: bool,
     /// g0-notices' open tail: a failure toast queued for the app shell
     /// (drained after the dock into the app's notice stack — the panel
     /// cannot post on it itself). The status line stays in-panel.
@@ -490,6 +503,7 @@ impl ExportDialog {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             toast: None,
             completed_exports: 0,
             run_requested: false,
@@ -543,6 +557,16 @@ impl ExportDialog {
         self.obj_mtl = on;
     }
 
+    /// Whether an export also writes one layered PSD per map set.
+    pub fn psd(&self) -> bool {
+        self.psd
+    }
+
+    /// Turns layered PSD output on/off.
+    pub fn set_psd(&mut self, on: bool) {
+        self.psd = on;
+    }
+
     /// The preset an Export click runs: the chosen engine preset with the
     /// dialog's MaterialX and USD toggles applied.
     pub fn build_preset(&self) -> umber_export::ExportPreset {
@@ -550,6 +574,7 @@ impl ExportDialog {
         preset.materialx = self.materialx;
         preset.usda = self.usda;
         preset.obj_mtl = self.obj_mtl;
+        preset.psd = self.psd;
         preset
     }
 
@@ -691,6 +716,7 @@ impl ExportDialog {
                 .checkbox(&mut self.materialx, tr("export.materialx"));
             group.ui.checkbox(&mut self.usda, tr("export.usda"));
             group.ui.checkbox(&mut self.obj_mtl, tr("export.obj"));
+            group.ui.checkbox(&mut self.psd, tr("export.psd"));
             group.ui.horizontal(|ui| {
                 let dir = self.output_dir.display().to_string();
                 ui.label(tr_args("common.out-dir", [("dir", FluentValue::from(dir))]));
@@ -1030,49 +1056,110 @@ impl ExportDialog {
             }
         };
         let pad_hook: umber_export::DilateHook<'_> = &pad_hook;
+        let group_plans: Vec<GroupPlan<'_>> = groups
+            .iter()
+            .map(|(set_name, group_tiles)| {
+                let group_sources = umber_export::TokenSources {
+                    texture_set: set_name.as_deref().unwrap_or(&texture_set),
+                    ..sources
+                };
+                let pairs: Vec<(u16, &umber_export::MapSet)> = tile_sets
+                    .iter()
+                    .filter(|t| group_tiles.contains(&t.tile))
+                    .map(|t| (t.tile, &t.set))
+                    .collect();
+                GroupPlan {
+                    sources: group_sources,
+                    pairs,
+                    tiles: group_tiles.as_slice(),
+                    tile_names: obj_tile_names(group_tiles),
+                }
+            })
+            .collect();
+
+        // Whole-app preflight across EVERY group before the first texture
+        // is written: expanded driver paths (textures + .mtlx), OBJ/MTL
+        // destinations, USDA destinations, and the MTL compatibility walk
+        // (packed channels / unsafe references) for every tile. One outer
+        // guard then backs up all originals, so any later failure restores
+        // the complete export rather than one group.
+        let mesh_view = umber_export::usd::UsdMeshView {
+            positions: &mesh.positions,
+            normals: &mesh.normals,
+            uvs: &mesh.uvs,
+            indices: &mesh.indices,
+        };
+        let mut planned_paths = Vec::new();
+        for plan in &group_plans {
+            planned_paths.extend(umber_export::expanded_output_paths_tiled(
+                &filtered,
+                &plan.pairs,
+                &plan.sources,
+                &self.output_dir,
+            )?);
+            if filtered.obj_mtl {
+                for &tile in plan.tiles {
+                    let tile_arg = plan.tile_names.then_some(tile);
+                    let textures = umber_export::usd::usd_textures(&filtered, |output| {
+                        umber_export::obj::obj_file_for_output(output, &plan.sources, tile_arg)
+                    });
+                    // Packed MTL inputs are rejected here, BEFORE any
+                    // texture lands on disk.
+                    umber_export::obj::to_mtl_document(
+                        plan.sources.texture_set,
+                        &textures,
+                        tile_arg,
+                    )
+                    .with_context(|| format!("to_mtl_document preflight ({tile})"))?;
+                    let (obj, mtl) = umber_export::obj::obj_mtl_output_paths(
+                        &self.output_dir,
+                        plan.sources.texture_set,
+                        tile_arg,
+                    )?;
+                    planned_paths.extend([obj, mtl]);
+                }
+            }
+            if filtered.usda {
+                for &tile in plan.tiles {
+                    let asset = if plan.tile_names {
+                        format!("{}_{tile}", plan.sources.texture_set)
+                    } else {
+                        plan.sources.texture_set.to_string()
+                    };
+                    planned_paths.push(umber_export::usd::usda_output_path(
+                        &self.output_dir,
+                        &asset,
+                    )?);
+                }
+            }
+        }
+        let mut guard = umber_export::ExportArtifactGuard::new(&self.output_dir)?;
+        guard.backup_all(&planned_paths)?;
+
         let mut written = Vec::new();
-        for (set_name, group_tiles) in &groups {
-            let group_tile_names = obj_tile_names(group_tiles);
-            let pairs: Vec<(u16, &umber_export::MapSet)> = tile_sets
-                .iter()
-                .filter(|t| group_tiles.contains(&t.tile))
-                .map(|t| (t.tile, &t.set))
-                .collect();
-            let group_sources = umber_export::TokenSources {
-                texture_set: set_name.as_deref().unwrap_or(&texture_set),
-                ..sources
-            };
+        for plan in &group_plans {
             written.extend(
                 umber_export::run_preset_tiled_dilated(
                     &filtered,
-                    &pairs,
-                    &group_sources,
+                    &plan.pairs,
+                    &plan.sources,
                     &self.output_dir,
                     Some(pad_hook),
                 )
-                .with_context(|| format!("run_preset_tiled ({})", group_sources.texture_set))?,
+                .with_context(|| format!("run_preset_tiled ({})", plan.sources.texture_set))?,
             );
             if filtered.obj_mtl {
-                for &tile in group_tiles {
+                for &tile in plan.tiles {
+                    let tile_arg = plan.tile_names.then_some(tile);
                     let textures = umber_export::usd::usd_textures(&filtered, |output| {
-                        umber_export::obj::obj_file_for_output(
-                            output,
-                            &group_sources,
-                            group_tile_names.then_some(tile),
-                        )
+                        umber_export::obj::obj_file_for_output(output, &plan.sources, tile_arg)
                     });
-                    let mesh_view = umber_export::usd::UsdMeshView {
-                        positions: &mesh.positions,
-                        normals: &mesh.normals,
-                        uvs: &mesh.uvs,
-                        indices: &mesh.indices,
-                    };
                     let (obj, mtl) = umber_export::obj::write_obj_with_mtl(
                         &self.output_dir,
-                        group_sources.texture_set,
+                        plan.sources.texture_set,
                         &mesh_view,
                         &textures,
-                        group_tile_names.then_some(tile),
+                        tile_arg,
                     )
                     .with_context(|| format!("write_obj_with_mtl ({tile})"))?;
                     written.extend([obj, mtl]);
@@ -1082,29 +1169,23 @@ impl ExportDialog {
                 // One concrete document per tile. A lone 1001 keeps the
                 // original `<set>.usda`; tiled runs use `<set>_<tile>.usda`
                 // and a concrete tile number, never a dangling `<UDIM>` reference.
-                for &tile in group_tiles {
+                for &tile in plan.tiles {
                     let udim = tile.to_string();
                     let tile_sources = umber_export::TokenSources {
                         udim: &udim,
-                        ..group_sources
+                        ..plan.sources
                     };
                     let textures = umber_export::usd::usd_textures(&filtered, |output| {
                         umber_export::obj::obj_file_for_output(
                             output,
                             &tile_sources,
-                            group_tile_names.then_some(tile),
+                            plan.tile_names.then_some(tile),
                         )
                     });
-                    let mesh_view = umber_export::usd::UsdMeshView {
-                        positions: &mesh.positions,
-                        normals: &mesh.normals,
-                        uvs: &mesh.uvs,
-                        indices: &mesh.indices,
-                    };
-                    let asset = if group_tile_names {
-                        format!("{}_{tile}", group_sources.texture_set)
+                    let asset = if plan.tile_names {
+                        format!("{}_{tile}", plan.sources.texture_set)
                     } else {
-                        group_sources.texture_set.to_string()
+                        plan.sources.texture_set.to_string()
                     };
                     written.push(
                         umber_export::usd::write_usda(
@@ -1118,6 +1199,8 @@ impl ExportDialog {
                 }
             }
         }
+        // Every group/document succeeded: keep the new bytes.
+        guard.commit();
         let write_ms = write_started.elapsed().as_millis();
 
         Ok(ExportOutcome {
@@ -1180,10 +1263,11 @@ mod tests {
         harness.run();
         // The reason line is on screen (`get_by_label` panics when absent).
         harness.get_by_label(&crate::i18n::tr("export.no-mesh"));
-        let (mtlx, usda, obj_mtl) = (
+        let (mtlx, usda, obj_mtl, psd) = (
             harness.state().materialx(),
             harness.state().usda(),
             harness.state().obj_mtl(),
+            harness.state().psd(),
         );
         harness
             .get_by_label(&crate::i18n::tr("export.materialx"))
@@ -1195,9 +1279,12 @@ mod tests {
         harness.run();
         harness.get_by_label(&crate::i18n::tr("export.obj")).click();
         harness.run();
+        harness.get_by_label(&crate::i18n::tr("export.psd")).click();
+        harness.run();
         assert_eq!(harness.state().materialx(), !mtlx, "MaterialX toggled");
         assert_eq!(harness.state().usda(), !usda, "USDA toggled");
         assert_eq!(harness.state().obj_mtl(), !obj_mtl, "OBJ+MTL toggled");
+        assert_eq!(harness.state().psd(), !psd, "PSD toggled");
         // The gate: disabled through AccessKit, and a click is inert.
         let export = crate::i18n::tr("button.export");
         assert!(harness.get_by_label(&export).accesskit_node().is_disabled());
@@ -1536,6 +1623,17 @@ mod tests {
         assert!(d.build_preset().obj_mtl);
         let (filtered, _) = filter_satisfiable(&d.build_preset(), &[]);
         assert!(filtered.obj_mtl);
+    }
+
+    #[test]
+    fn psd_toggle_reaches_the_run_preset() {
+        let mut d = dialog();
+        assert!(!d.psd(), "off by default");
+        assert!(!d.build_preset().psd);
+        d.set_psd(true);
+        assert!(d.build_preset().psd);
+        let (filtered, _) = filter_satisfiable(&d.build_preset(), &[]);
+        assert!(filtered.psd);
     }
 
     #[test]

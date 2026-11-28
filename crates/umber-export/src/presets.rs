@@ -119,6 +119,8 @@ pub enum OutputFormat {
     Png8,
     /// 16-bit PNG (bit-depth requirement: 8/16/32F).
     Png16,
+    /// 16-bit half-float EXR.
+    Exr16F,
     /// 32-bit float EXR.
     Exr32F,
     /// JPEG (8-bit, lossy — thumbnails/quick previews).
@@ -168,6 +170,10 @@ pub struct ExportPreset {
     /// older preset files → off, like [`Self::usda`].
     #[serde(default)]
     pub obj_mtl: bool,
+    /// Also write one layered `<textureSet>.psd` holding every map as a
+    /// named layer (`crate::psd`). Absent in older preset files → off.
+    #[serde(default)]
+    pub psd: bool,
 }
 
 /// Export-configuration errors.
@@ -211,6 +217,7 @@ impl ExportPreset {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_baseColor.png".into(),
@@ -276,6 +283,7 @@ impl ExportPreset {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_basecolor.png".into(),
@@ -331,6 +339,7 @@ impl ExportPreset {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_BaseMap.png".into(),
@@ -382,6 +391,7 @@ impl ExportPreset {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![
                 passthrough(MapKind::BaseColor, "$textureSet_basecolor.png"),
                 passthrough(MapKind::Roughness, "$textureSet_roughness.png"),

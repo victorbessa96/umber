@@ -193,6 +193,27 @@ fn object_stem(asset: &str, tile: Option<u16>) -> Result<String, ExportError> {
     Ok(obj_name(&name))
 }
 
+/// The OBJ and MTL destinations [`write_obj_with_mtl`] writes: the same
+/// sanitized object stem and tile suffix, WITHOUT touching the filesystem.
+/// Callers wrapping several writers in one [`crate::artifacts::ExportArtifactGuard`]
+/// use this to back up both files before the first write.
+///
+/// # Errors
+///
+/// [`ExportError::Write`] when the sanitized asset name exceeds
+/// [`MAX_OBJ_NAME_BYTES`].
+pub fn obj_mtl_output_paths(
+    out_dir: &Path,
+    asset: &str,
+    tile: Option<u16>,
+) -> Result<(PathBuf, PathBuf), ExportError> {
+    let object = object_stem(asset, tile)?;
+    Ok((
+        out_dir.join(format!("{object}.obj")),
+        out_dir.join(format!("{object}.mtl")),
+    ))
+}
+
 fn validate_texture_reference(file: &str) -> Result<(), ExportError> {
     if file.is_empty() {
         return Err(write_error("texture reference is empty"));
@@ -392,8 +413,7 @@ pub fn write_obj_with_mtl(
         }
     }
     std::fs::create_dir_all(out_dir).map_err(|e| write_error(e.to_string()))?;
-    let obj_path = out_dir.join(format!("{object}.obj"));
-    let mtl_path = out_dir.join(format!("{object}.mtl"));
+    let (obj_path, mtl_path) = obj_mtl_output_paths(out_dir, asset, tile)?;
     if obj_path.is_dir() || mtl_path.is_dir() {
         return Err(write_error(
             "OBJ/MTL output path is an existing directory".to_owned(),
@@ -644,6 +664,24 @@ mod tests {
     fn write_texture(dir: &Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(name), b"texture").unwrap();
+    }
+
+    #[test]
+    fn output_path_helper_matches_the_writer_naming() {
+        let dir = Path::new("/tmp/umber-obj-paths");
+        assert_eq!(
+            obj_mtl_output_paths(dir, "Sword", None).unwrap(),
+            (dir.join("Sword.obj"), dir.join("Sword.mtl"))
+        );
+        assert_eq!(
+            obj_mtl_output_paths(dir, "Sword", Some(1002)).unwrap(),
+            (dir.join("Sword_1002.obj"), dir.join("Sword_1002.mtl"))
+        );
+        // The helper runs the same sanitizer as the writer.
+        assert_eq!(
+            obj_mtl_output_paths(dir, "../x", None).unwrap().0,
+            dir.join("___x.obj")
+        );
     }
 
     #[test]

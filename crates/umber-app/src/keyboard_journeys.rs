@@ -290,7 +290,7 @@ fn export_journey_tab_order_is_header_combos_toggles_and_every_stop_is_named() {
     // The walk from nothing focused, in reading order. Every stop must
     // carry an accessible name (a named role, never "unknown").
     let mut stops: Vec<(Role, String)> = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..9 {
         press(&mut h, Key::Tab);
         let f = focused(&h).expect("Tab always lands on something here");
         assert!(
@@ -309,6 +309,7 @@ fn export_journey_tab_order_is_header_combos_toggles_and_every_stop_is_named() {
         (Role::CheckBox, tr("export.materialx")),
         (Role::CheckBox, tr("export.usda")),
         (Role::CheckBox, tr("export.obj")),
+        (Role::CheckBox, tr("export.psd")),
         (Role::Button, tr("button.choose")),
         (Role::Button, tr("tiles.label")), // the tiles group header
     ];
@@ -322,20 +323,20 @@ fn export_journey_tab_order_is_header_combos_toggles_and_every_stop_is_named() {
     shift_tab(&mut h);
     assert_eq!(
         focused(&h),
+        Some(expected[6].clone()),
+        "Choose back to layered PSD"
+    );
+    shift_tab(&mut h);
+    assert_eq!(
+        focused(&h),
         Some(expected[5].clone()),
-        "Choose back to OBJ+MTL"
+        "Layered PSD back to OBJ+MTL"
     );
     shift_tab(&mut h);
     assert_eq!(
         focused(&h),
         Some(expected[4].clone()),
         "OBJ+MTL back to USDA"
-    );
-    shift_tab(&mut h);
-    assert_eq!(
-        focused(&h),
-        Some(expected[3].clone()),
-        "USDA back to MaterialX"
     );
 }
 

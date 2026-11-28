@@ -10,6 +10,7 @@
 //! Wave 2 adds PNG encoding ([`png`]) of paint-target readbacks. Wave 3
 //! adds EXR float export ([`exr`]) and TIFF/JPEG ([`formats`]).
 
+pub mod artifacts;
 pub mod dither;
 pub mod driver;
 pub mod exr;
@@ -24,12 +25,13 @@ pub mod usd;
 
 pub use dither::dither_quantize_rgba8;
 
+pub use artifacts::ExportArtifactGuard;
 pub use driver::{
-    mesh_stem, output_color_space, run_preset, run_preset_dilated, run_preset_dilated_with_surface,
-    run_preset_tiled, run_preset_tiled_dilated, run_preset_tiled_dilated_with_surface,
-    run_preset_tiled_with_surface, src_map_token, tiled_template, DilateHook, ExportError, MapSet,
-    TokenSources, DEFAULT_JPEG_QUALITY, DEFAULT_PADDING_TEXELS, SINGLE_TILE_UDIM,
-    WORKING_NORMAL_CONVENTION,
+    expanded_output_paths, expanded_output_paths_tiled, mesh_stem, output_color_space, run_preset,
+    run_preset_dilated, run_preset_dilated_with_surface, run_preset_tiled,
+    run_preset_tiled_dilated, run_preset_tiled_dilated_with_surface, run_preset_tiled_with_surface,
+    src_map_token, tiled_template, DilateHook, ExportError, MapSet, TokenSources,
+    DEFAULT_JPEG_QUALITY, DEFAULT_PADDING_TEXELS, SINGLE_TILE_UDIM, WORKING_NORMAL_CONVENTION,
 };
 pub use formats::{write_jpeg_rgba8, write_tiff_rgba8, JpegError, TiffError};
 pub use icc::{embed_iccp, embed_srgb_iccp, SRGB_ICC_PROFILE};

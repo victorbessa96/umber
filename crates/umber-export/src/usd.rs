@@ -485,6 +485,20 @@ fn reader_name<'a>(textures: &'a [UsdTexture], texture: &UsdTexture) -> String {
     format!("Texture_{n}")
 }
 
+/// The `.usda` destination [`write_usda`] writes: `<sanitized asset>.usda`
+/// under `out_dir`, with the same symlink/non-regular refusal as the
+/// document writers and WITHOUT touching the filesystem. Callers wrapping
+/// several writers in one [`crate::artifacts::ExportArtifactGuard`] use
+/// this to back up the document before the first texture write.
+///
+/// # Errors
+///
+/// [`ExportError::Write`] when the destination is a symlink or non-regular
+/// file.
+pub fn usda_output_path(out_dir: &Path, asset: &str) -> Result<PathBuf, ExportError> {
+    crate::driver::document_output_path(out_dir, asset, "usda")
+}
+
 /// Writes `<asset>.usda` under `out_dir`, returning its path. The
 /// document references the texture files by relative path; the caller
 /// passes the names the run actually wrote (see [`usd_textures`] +
@@ -506,7 +520,7 @@ pub fn write_usda(
             cap: MAX_USDA_EXPORT_BYTES,
         });
     }
-    let path = crate::driver::document_output_path(out_dir, asset, "usda")?;
+    let path = usda_output_path(out_dir, asset)?;
     std::fs::write(&path, doc).map_err(|e| ExportError::Write(e.to_string()))?;
     Ok(path)
 }
@@ -715,6 +729,20 @@ mod tests {
         )
         .unwrap();
         assert!(doc.contains("@Sword_baseColor_<UDIM>.png@"));
+    }
+
+    #[test]
+    fn output_path_helper_matches_the_writer_naming() {
+        let dir = Path::new("/tmp/umber-usda-paths");
+        assert_eq!(
+            usda_output_path(dir, "Sword").unwrap(),
+            dir.join("Sword.usda")
+        );
+        // The helper runs the same sanitizer as the writer.
+        assert_eq!(
+            usda_output_path(dir, "../escape").unwrap(),
+            dir.join(".._escape.usda")
+        );
     }
 
     #[test]

@@ -119,6 +119,43 @@ fn check_exr_size(width: usize, height: usize) -> Result<(), ExrError> {
     Ok(())
 }
 
+/// Encodes `rgba` (width×height×4 f32, row-major) into a 16-bit half-float
+/// EXR file at `path`, creating parent directories as needed. Values are
+/// rounded to half precision by `half::f16::from_f32`; the file's channel
+/// metadata is F16, not an F32 file with smaller values.
+///
+/// # Errors
+///
+/// [`ExrError::SizeMismatch`] when the slice doesn't match the dimensions;
+/// [`ExrError::Encode`] from the encoder; [`ExrError::Io`] from the filesystem.
+pub fn write_exr_f16(path: &Path, width: u32, height: u32, rgba: &[f32]) -> Result<(), ExrError> {
+    let expected = width as usize * height as usize * 4;
+    if rgba.len() != expected {
+        return Err(ExrError::SizeMismatch {
+            actual: rgba.len(),
+            expected,
+            width,
+            height,
+        });
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    exr_prelude::write_rgba_file(path, w, h, |x: usize, y: usize| {
+        let row = h - 1 - y;
+        let i = (row * w + x) * 4;
+        (
+            exr_prelude::f16::from_f32(rgba[i]),
+            exr_prelude::f16::from_f32(rgba[i + 1]),
+            exr_prelude::f16::from_f32(rgba[i + 2]),
+            exr_prelude::f16::from_f32(rgba[i + 3]),
+        )
+    })?;
+    Ok(())
+}
+
 /// Reads an EXR file's first RGBA layer into floats
 /// (width×height×4 f32, row-major) — the inverse direction of
 /// [`write_exr_f32`], for HDR environment maps and float interchange.
@@ -225,6 +262,45 @@ mod tests {
         assert!(top_left[0].abs() < 1e-6);
         assert!((top_left[3] - 1.0).abs() < 1e-6);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn f16_roundtrips_half_samples_and_marks_the_header() {
+        let path = tmp_path("roundtrip-f16");
+        let rgba: Vec<f32> = vec![
+            0.0, 0.5, 1.0, 2.0, 0.25, 1.5, 0.75, 0.125, 2.0, 4.0, 0.5, 1.0, 0.125, 0.25, 0.5, 0.75,
+        ];
+        write_exr_f16(&path, 2, 2, &rgba).unwrap();
+
+        let meta = exr::meta::MetaData::read_from_file(&path, false).unwrap();
+        assert!(
+            meta.headers[0]
+                .channels
+                .list
+                .iter()
+                .all(|channel| channel.sample_type == exr::meta::attribute::SampleType::F16),
+            "every channel must be encoded as half float"
+        );
+        let image = exr::prelude::read_first_rgba_layer_from_file(
+            &path,
+            |resolution, _| vec![vec![[0.0f32; 4]; resolution.width()]; resolution.height()],
+            |pixels, position, (r, g, b, a): (f32, f32, f32, f32)| {
+                pixels[position.y()][position.x()] = [r, g, b, a]
+            },
+        )
+        .unwrap();
+        let layer = image.layer_data;
+        assert_eq!(layer.channel_data.pixels[0][0], [2.0, 4.0, 0.5, 1.0]);
+        assert_eq!(layer.channel_data.pixels[1][0], [0.0, 0.5, 1.0, 2.0]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn f16_rejects_mismatched_buffer_size() {
+        let path = tmp_path("mismatch-f16");
+        let err = write_exr_f16(&path, 2, 2, &[0.0f32; 7]).unwrap_err();
+        assert!(matches!(err, ExrError::SizeMismatch { .. }));
+        assert!(!path.exists(), "no file may be written on error");
     }
 
     #[test]

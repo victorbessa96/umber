@@ -364,6 +364,7 @@ export =
     .materialx = MaterialX (.mtlx)
     .usda = USD (.usda)
     .obj = OBJ + MTL
+    .psd = PSD em camadas (.psd)
     .select-tile = Selecione ao menos um tile para exportar.
     .tile-badge = { $count ->
         [one] { $count } tile

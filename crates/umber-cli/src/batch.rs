@@ -209,6 +209,9 @@ struct ExportStep {
     /// Also write OBJ + MTL (the `--obj` flag's recipe form).
     #[serde(default)]
     obj_mtl: bool,
+    /// Also write one layered PSD per map set (the `--psd` recipe form).
+    #[serde(default)]
+    psd: bool,
 }
 
 /// `steps[i]`, plus `.<key>` when the step is a single-key object — the
@@ -321,6 +324,7 @@ fn run_step(step: &BatchStep) -> Result<String> {
                 crate::ExportDocFlags {
                     usda: s.usda,
                     obj_mtl: s.obj_mtl,
+                    psd: s.psd,
                 },
                 &mut print_skipped,
             )?;

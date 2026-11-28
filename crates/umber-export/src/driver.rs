@@ -96,6 +96,10 @@ pub enum ExportError {
     /// overwrite each other).
     #[error("tile {0} appears more than once in the tiled export")]
     DuplicateTile(u16),
+    /// Two outputs expanded to the same destination (after lexical path
+    /// normalization), so one would silently overwrite the other.
+    #[error("duplicate export output destination: {0:?}")]
+    DuplicateOutput(PathBuf),
 }
 
 impl From<crate::png::PngError> for ExportError {
@@ -345,7 +349,7 @@ fn output_transfer(output: &OutputSpec) -> Transfer {
             }
         }
         OutputFormat::Tiff => Transfer::Srgb,
-        OutputFormat::Exr32F | OutputFormat::Jpeg => Transfer::Linear,
+        OutputFormat::Exr16F | OutputFormat::Exr32F | OutputFormat::Jpeg => Transfer::Linear,
     }
 }
 
@@ -439,6 +443,12 @@ pub fn run_preset_dilated_with_surface(
 ) -> Result<Vec<PathBuf>, ExportError> {
     std::fs::create_dir_all(out_dir).map_err(|e| ExportError::Write(e.to_string()))?;
     validate_set(preset, set)?;
+    // Preflight every destination (including the .mtlx) before the first
+    // writer runs: duplicates are a whole-run error, and the guard backs up
+    // existing files so a late failure restores the complete run.
+    let paths = expanded_output_paths(preset, sources, out_dir)?;
+    let mut guard = crate::artifacts::ExportArtifactGuard::new(out_dir)?;
+    guard.backup_all(&paths)?;
     let mut written = Vec::new();
     write_outputs(
         preset,
@@ -458,6 +468,12 @@ pub fn run_preset_dilated_with_surface(
         });
         written.push(write_materialx(out_dir, sources.texture_set, &doc)?);
     }
+    if preset.psd {
+        let path = document_output_path(out_dir, sources.texture_set, "psd")?;
+        crate::psd::write_psd_maps(set, &path).map_err(ExportError::Write)?;
+        written.push(path);
+    }
+    guard.commit();
     Ok(written)
 }
 
@@ -558,6 +574,11 @@ pub fn run_preset_tiled_dilated_with_surface(
     for (_, set) in tiles {
         validate_set(preset, set)?;
     }
+    // Whole-run preflight: every tile's expanded paths plus the one .mtlx,
+    // duplicate-checked and backed up before the first tile writes.
+    let paths = expanded_output_paths_tiled(preset, tiles, sources, out_dir)?;
+    let mut guard = crate::artifacts::ExportArtifactGuard::new(out_dir)?;
+    guard.backup_all(&paths)?;
     let tile_names = tiles.len() > 1 || tiles.iter().any(|(tile, _)| *tile != FIRST_TILE);
     let mut written = Vec::new();
     for (tile, set) in tiles {
@@ -576,6 +597,16 @@ pub fn run_preset_tiled_dilated_with_surface(
             dilation,
             &mut written,
         )?;
+        if preset.psd {
+            let asset = if tile_names {
+                format!("{}_{tile}", sources.texture_set)
+            } else {
+                sources.texture_set.to_string()
+            };
+            let path = document_output_path(out_dir, &asset, "psd")?;
+            crate::psd::write_psd_maps(set, &path).map_err(ExportError::Write)?;
+            written.push(path);
+        }
     }
     if preset.materialx && !tiles.is_empty() {
         let doc = if tile_names {
@@ -599,7 +630,93 @@ pub fn run_preset_tiled_dilated_with_surface(
         };
         written.push(write_materialx(out_dir, sources.texture_set, &doc)?);
     }
+    guard.commit();
     Ok(written)
+}
+
+/// Every path a single-set [`run_preset`] run writes, WITHOUT touching the
+/// filesystem: each output's expanded name plus the `.mtlx` document when
+/// [`ExportPreset::materialx`] is on. The driver and callers that wrap
+/// several runs in one guard share this expansion.
+///
+/// # Errors
+///
+/// [`ExportError::Write`] when the `.mtlx` destination is a symlink or
+/// non-regular file (the same check [`write_materialx`] applies).
+pub fn expanded_output_paths(
+    preset: &ExportPreset,
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, ExportError> {
+    let mut paths: Vec<PathBuf> = preset
+        .outputs
+        .iter()
+        .map(|output| output_path(output, sources, out_dir, false))
+        .collect();
+    if preset.materialx {
+        paths.push(document_output_path(out_dir, sources.texture_set, "mtlx")?);
+    }
+    if preset.psd {
+        paths.push(document_output_path(out_dir, sources.texture_set, "psd")?);
+    }
+    Ok(paths)
+}
+
+/// [`expanded_output_paths`] for a tiled run: every tile's outputs (the
+/// same [`tiled_template`] rule and per-tile `$udim` the writers use) plus
+/// the one `.mtlx` when enabled. An empty `tiles` yields no paths (the
+/// writer writes nothing either).
+///
+/// # Errors
+///
+/// As [`expanded_output_paths`].
+pub fn expanded_output_paths_tiled(
+    preset: &ExportPreset,
+    tiles: &[(u16, &MapSet)],
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, ExportError> {
+    let tile_names = tiles.len() > 1 || tiles.iter().any(|(tile, _)| *tile != FIRST_TILE);
+    let mut paths = Vec::new();
+    for (tile, _) in tiles {
+        let udim = tile.to_string();
+        let tile_sources = TokenSources {
+            udim: &udim,
+            ..*sources
+        };
+        for output in &preset.outputs {
+            paths.push(output_path(output, &tile_sources, out_dir, tile_names));
+        }
+        if preset.psd {
+            let asset = if tile_names {
+                format!("{}_{tile}", sources.texture_set)
+            } else {
+                sources.texture_set.to_string()
+            };
+            paths.push(document_output_path(out_dir, &asset, "psd")?);
+        }
+    }
+    if preset.materialx && !tiles.is_empty() {
+        paths.push(document_output_path(out_dir, sources.texture_set, "mtlx")?);
+    }
+    Ok(paths)
+}
+
+/// The destination one output writes: the single source of truth shared by
+/// [`write_outputs`] and the path preflight. `tile_names` routes the
+/// template through [`tiled_template`] first.
+fn output_path(
+    output: &OutputSpec,
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+    tile_names: bool,
+) -> PathBuf {
+    let filename = if tile_names {
+        sources.expand_output_from(output, &tiled_template(&output.filename))
+    } else {
+        sources.expand_output(output)
+    };
+    out_dir.join(filename)
 }
 
 /// The `.mtlx` side of a run: one [`MtlxTexture`] per OpenPBR-wirable
@@ -813,12 +930,7 @@ fn write_outputs(
         // sources (per-output $srcMap/$colorSpace derived here; empty
         // sources pass through verbatim per the template engine's
         // contract). Tiled runs first make the template tile-unique.
-        let filename = if tile_names {
-            sources.expand_output_from(output, &tiled_template(&output.filename))
-        } else {
-            sources.expand_output(output)
-        };
-        let path = out_dir.join(filename);
+        let path = output_path(output, sources, out_dir, tile_names);
 
         let transfer = output_transfer(output);
 
@@ -841,7 +953,7 @@ fn write_outputs(
                 }
                 crate::png::write_png16(&path, size, size, &u16s, transfer)?;
             }
-            OutputFormat::Exr32F => {
+            OutputFormat::Exr16F | OutputFormat::Exr32F => {
                 // Widen u8 sources to f32 in [0,1] — the driver's
                 // contract (EXR output from 8-bit sources is
                 // lossless-but-quantized; true float sources arrive
@@ -850,7 +962,11 @@ fn write_outputs(
                 for b in &packed {
                     f32s.push(f32::from(*b) / 255.0);
                 }
-                exr::write_exr_f32(&path, size, size, &f32s)?;
+                if output.format == OutputFormat::Exr16F {
+                    exr::write_exr_f16(&path, size, size, &f32s)?;
+                } else {
+                    exr::write_exr_f32(&path, size, size, &f32s)?;
+                }
             }
             OutputFormat::Tiff => formats::write_tiff_rgba8(&path, size, size, &packed, transfer)?,
             OutputFormat::Jpeg => {
@@ -1019,6 +1135,114 @@ mod tests {
     }
 
     #[test]
+    fn exr16f_output_reaches_the_half_float_writer() {
+        let size = 1;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 128));
+        let mut output = passthrough_output("$textureSet_half.exr", MapKind::BaseColor);
+        output.format = OutputFormat::Exr16F;
+        let preset = ExportPreset {
+            name: "half".into(),
+            materialx: false,
+            usda: false,
+            obj_mtl: false,
+            psd: false,
+            outputs: vec![output],
+        };
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-exr16f-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let written = run_preset(&preset, &set, &TokenSources::new("Hull"), &out).unwrap();
+        let meta = ::exr::meta::MetaData::read_from_file(&written[0], false).unwrap();
+        assert!(meta.headers[0]
+            .channels
+            .list
+            .iter()
+            .all(|channel| channel.sample_type == ::exr::meta::attribute::SampleType::F16));
+        let image = ::exr::prelude::read_first_rgba_layer_from_file(
+            &written[0],
+            |resolution, _| vec![vec![[0.0f32; 4]; resolution.width()]; resolution.height()],
+            |pixels, position, (r, g, b, a): (f32, f32, f32, f32)| {
+                pixels[position.y()][position.x()] = [r, g, b, a]
+            },
+        )
+        .unwrap();
+        let pixel = image.layer_data.channel_data.pixels[0][0];
+        let expected = 128.0 / 255.0;
+        assert!((pixel[0] - expected).abs() < 0.001, "R half sample");
+        assert!((pixel[3] - expected).abs() < 0.001, "A half sample");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn psd_toggle_writes_and_roundtrips_one_layered_document() {
+        let size = 1;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 10));
+        set.set(MapKind::Roughness, solid(size, 64));
+        let preset = ExportPreset {
+            name: "psd".into(),
+            materialx: false,
+            usda: false,
+            obj_mtl: false,
+            psd: true,
+            outputs: Vec::new(),
+        };
+        let out = std::env::temp_dir().join(format!("umber-export-drv-psd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let written = run_preset(&preset, &set, &TokenSources::new("Hull"), &out).unwrap();
+        assert_eq!(written, vec![out.join("Hull.psd")]);
+        let doc = crate::psd::read_back(&written[0]).unwrap();
+        let names: Vec<String> = doc
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|layer| layer.additional_info.name.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(names, vec!["baseColor", "roughness"]);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn psd_tiled_run_writes_one_layered_document_per_tile() {
+        let size = 1;
+        let set_a = {
+            let mut set = MapSet::new(size);
+            set.set(MapKind::BaseColor, solid(size, 10));
+            set
+        };
+        let set_b = {
+            let mut set = MapSet::new(size);
+            set.set(MapKind::BaseColor, solid(size, 20));
+            set
+        };
+        let preset = ExportPreset {
+            name: "psd tiles".into(),
+            materialx: false,
+            usda: false,
+            obj_mtl: false,
+            psd: true,
+            outputs: Vec::new(),
+        };
+        let tiles = [(1001, &set_a), (1002, &set_b)];
+        let sources = TokenSources::new("Hull");
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-psd-tiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let planned = expanded_output_paths_tiled(&preset, &tiles, &sources, &out).unwrap();
+        let written = run_preset_tiled(&preset, &tiles, &sources, &out).unwrap();
+        assert_eq!(planned, written);
+        assert_eq!(
+            written,
+            vec![out.join("Hull_1001.psd"), out.join("Hull_1002.psd")]
+        );
+        assert!(crate::psd::read_back(&written[0]).is_ok());
+        assert!(crate::psd::read_back(&written[1]).is_ok());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
     fn missing_map_fails_the_output_cleanly() {
         let size = 2;
         let mut set = MapSet::new(size);
@@ -1072,6 +1296,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![crate::presets::OutputSpec {
                 filename: "$textureSet_wiring.png".into(),
                 maps: vec![(MapKind::Roughness, vec![]), (MapKind::Metallic, vec![])],
@@ -1128,6 +1353,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1164,6 +1390,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1196,6 +1423,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![crate::presets::OutputSpec {
                 filename: "$textureSet_$srcMap_$colorSpace.png".into(),
                 maps: vec![
@@ -1335,6 +1563,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![passthrough_output(
                 "$textureSet_$srcMap_$udim.png",
                 MapKind::BaseColor,
@@ -1426,6 +1655,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1512,6 +1742,106 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ExportError::DuplicateTile(1002)));
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[test]
+    fn duplicate_expanded_output_names_fail_before_the_first_output_exists() {
+        let size = 1;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 10));
+        let preset = ExportPreset {
+            name: "duplicate outputs".into(),
+            materialx: false,
+            usda: false,
+            obj_mtl: false,
+            psd: false,
+            outputs: vec![
+                passthrough_output("$textureSet_same.png", MapKind::BaseColor),
+                passthrough_output("$textureSet_same.png", MapKind::BaseColor),
+            ],
+        };
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-dupname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let err = run_preset(&preset, &set, &TokenSources::new("Body"), &out).unwrap_err();
+        assert!(
+            matches!(err, ExportError::DuplicateOutput(_)),
+            "expected DuplicateOutput, got {err:?}"
+        );
+        let files = std::fs::read_dir(&out).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(
+            files, 0,
+            "nothing may be written before the duplicate check"
+        );
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[test]
+    fn lexically_aliased_output_names_are_duplicates_too() {
+        // `sub/../x.png` and `x.png` are the same destination even though
+        // `sub` does not exist — the guard compares lexically.
+        let size = 1;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 10));
+        let preset = ExportPreset {
+            name: "alias outputs".into(),
+            materialx: false,
+            usda: false,
+            obj_mtl: false,
+            psd: false,
+            outputs: vec![
+                passthrough_output("$textureSet_alias.png", MapKind::BaseColor),
+                passthrough_output("sub/../$textureSet_alias.png", MapKind::BaseColor),
+            ],
+        };
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-dupalias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let err = run_preset(&preset, &set, &TokenSources::new("Body"), &out).unwrap_err();
+        assert!(
+            matches!(err, ExportError::DuplicateOutput(_)),
+            "expected DuplicateOutput, got {err:?}"
+        );
+        let files = std::fs::read_dir(&out).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(
+            files, 0,
+            "nothing may be written before the duplicate check"
+        );
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[test]
+    fn expanded_output_paths_match_the_written_names() {
+        // The preflight helper and the writer must expand identically —
+        // including the .mtlx document.
+        let set = gltf_ready_set(2, 200);
+        let preset = with_materialx(ExportPreset::gltf_metal_rough());
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-pathpre-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let sources = TokenSources::new("Sword");
+        let planned = expanded_output_paths(&preset, &sources, &out).unwrap();
+        let written = run_preset(&preset, &set, &sources, &out).unwrap();
+        assert_eq!(planned, written);
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[test]
+    fn tiled_expanded_output_paths_match_the_written_names() {
+        let set_a = gltf_ready_set(2, 10);
+        let set_b = gltf_ready_set(2, 20);
+        let preset = with_materialx(ExportPreset::gltf_metal_rough());
+        let out = std::env::temp_dir().join(format!(
+            "umber-export-drv-pathpretiled-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&out);
+        let sources = TokenSources::new("Sword");
+        let tiles = [(1001, &set_a), (1002, &set_b)];
+        let planned = expanded_output_paths_tiled(&preset, &tiles, &sources, &out).unwrap();
+        let written = run_preset_tiled(&preset, &tiles, &sources, &out).unwrap();
+        assert_eq!(planned, written);
         std::fs::remove_dir_all(&out).ok();
     }
 
@@ -1729,6 +2059,7 @@ mod tests {
             materialx: true,
             usda: false,
             obj_mtl: false,
+            psd: false,
         };
         let mut set = MapSet::new(2);
         set.set(MapKind::Roughness, solid(2, 64));
@@ -1812,6 +2143,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
         };
         let tiles: Vec<(u16, &MapSet)> = vec![(1001, &set), (1002, &other)];
         let out = std::env::temp_dir().join(format!(
@@ -1846,6 +2178,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![passthrough_output("$textureSet_r.png", MapKind::Roughness)],
         };
         let out =
@@ -1883,6 +2216,7 @@ mod tests {
             materialx: false,
             usda: false,
             obj_mtl: false,
+            psd: false,
             outputs: vec![passthrough_output("$textureSet_r.png", MapKind::Roughness)],
         };
         let base =

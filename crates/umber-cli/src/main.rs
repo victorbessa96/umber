@@ -55,7 +55,7 @@ fn main() -> Result<()> {
             println!("commands: inspect <mesh-file>");
             println!("          bake-ao <mesh-file> <out.png> [--size N] [--rays N] [--dilate N] [--margin extend|adjacent]");
             println!("          bake-all <mesh-file> <out-dir> [--size N] [--rays N] [--dilate N] [--margin extend|adjacent]");
-            println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda] [--obj]");
+            println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda] [--obj] [--psd]");
             println!("          batch <recipe.json>");
             println!("          agent   (JSONL steps on stdin, one JSON result line each on stdout)");
             println!("          mcp     [--read-root DIR] [--write-root DIR]   (MCP server on stdio, tools over the agent session)");
@@ -245,6 +245,8 @@ pub struct ExportDocFlags {
     pub usda: bool,
     /// Write OBJ + MTL with passthrough material/texture references.
     pub obj_mtl: bool,
+    /// Write one layered PSD per map set.
+    pub psd: bool,
 }
 
 /// Parses a `--margin` value: `extend` (Blender's Extend, the default)
@@ -300,7 +302,7 @@ fn parse_bake_flags(args: &[String], start: usize) -> Result<BakeFlags> {
             // export_cmd parses --preset/--tile itself; skip them (value too).
             "--preset" | "--tile" => i += 2,
             // export_cmd's value-less document toggles.
-            "--usda" | "--obj" => i += 1,
+            "--usda" | "--obj" | "--psd" => i += 1,
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
     }
@@ -876,7 +878,7 @@ fn parse_tile(value: &str) -> Result<u16> {
 }
 
 /// `export <mesh> <out-dir> --preset <name> [--size N] [--rays N]
-/// [--tile UDIM]... [--usda] [--obj]` — runs the full pipeline headless:
+/// [--tile UDIM]... [--usda] [--obj] [--psd]` — runs the full pipeline headless:
 /// bakes the P0 maps, packs them through the chosen export preset, and
 /// writes the named outputs.
 ///
@@ -894,7 +896,7 @@ fn parse_tile(value: &str) -> Result<u16> {
 /// `$udim` get `_<tile>` before the extension so tiles never collide.
 fn export_cmd(args: &[String]) -> Result<()> {
     let usage =
-        "usage: umber-cli export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda] [--obj]";
+        "usage: umber-cli export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda] [--obj] [--psd]";
     let mesh_path = args.first().ok_or_else(|| anyhow::anyhow!("{usage}"))?;
     let out_dir = args.get(1).ok_or_else(|| anyhow::anyhow!("{usage}"))?;
 
@@ -902,6 +904,7 @@ fn export_cmd(args: &[String]) -> Result<()> {
     let mut requested_tiles = Vec::new();
     let mut usda = false;
     let mut obj_mtl = false;
+    let mut psd = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -927,6 +930,10 @@ fn export_cmd(args: &[String]) -> Result<()> {
                 obj_mtl = true;
                 i += 1;
             }
+            "--psd" => {
+                psd = true;
+                i += 1;
+            }
             "--size" | "--rays" => i += 2, // parsed by BakeFlags below
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
@@ -939,7 +946,7 @@ fn export_cmd(args: &[String]) -> Result<()> {
         &preset_name,
         &flags,
         &requested_tiles,
-        ExportDocFlags { usda, obj_mtl },
+        ExportDocFlags { usda, obj_mtl, psd },
         &mut print_skipped,
     )?;
     for path in &written {
@@ -1037,6 +1044,7 @@ fn export_mesh(
     let mut full_preset = preset_by_name(ask.preset_name)?;
     full_preset.usda |= ask.documents.usda;
     full_preset.obj_mtl |= ask.documents.obj_mtl;
+    full_preset.psd |= ask.documents.psd;
     let ctx = bake_context()?;
     // The project rule (bake's v0 contract, unified): an explicit
     // override names the outputs; none keeps the mesh-derived name
@@ -1117,6 +1125,7 @@ fn export_mesh(
         materialx: full_preset.materialx,
         usda: full_preset.usda,
         obj_mtl: full_preset.obj_mtl,
+        psd: full_preset.psd,
     };
     if preset.outputs.is_empty() {
         let preset_name = ask.preset_name;
@@ -1162,38 +1171,55 @@ fn export_mesh(
         // Overridden per tile by the tiled driver.
         udim: umber_export::SINGLE_TILE_UDIM,
     };
+    // Whole-run preflight: every texture/document destination, plus the
+    // OBJ/MTL compatibility walk, before the first texture is written. The
+    // outer guard then backs up all originals so a late failure restores
+    // the complete CLI export (not a half-written one).
+    let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
+    let mesh_view = umber_export::usd::UsdMeshView {
+        positions: &mesh.positions,
+        normals: &mesh.normals,
+        uvs: &mesh.uvs,
+        indices: &mesh.indices,
+    };
+    let mut planned_paths =
+        umber_export::expanded_output_paths_tiled(&preset, &pairs, &sources, out_dir)?;
+    if preset.usda {
+        planned_paths.push(umber_export::usd::usda_output_path(out_dir, &set_name)?);
+    }
+    if preset.obj_mtl {
+        for &tile in &tiles {
+            let tile_arg = tile_names.then_some(tile);
+            let textures = umber_export::usd::usd_textures(&preset, |output| {
+                umber_export::obj::obj_file_for_output(output, &sources, tile_arg)
+            });
+            // Packed/unsafe MTL inputs fail here, before any texture lands.
+            umber_export::obj::to_mtl_document(&set_name, &textures, tile_arg)?;
+            let (obj, mtl) = umber_export::obj::obj_mtl_output_paths(out_dir, &set_name, tile_arg)?;
+            planned_paths.extend([obj, mtl]);
+        }
+    }
+    let mut guard = umber_export::ExportArtifactGuard::new(out_dir)?;
+    guard.backup_all(&planned_paths)?;
+
     let mut written =
         umber_export::run_preset_tiled_dilated(&preset, &pairs, &sources, out_dir, Some(pad_hook))?;
     if preset.usda {
         // The `.usda` carries the whole mesh (per-tile splits stay a
         // bake-window concern); only its texture references are
         // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
-        let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
         let textures = umber_export::usd::usd_textures(&preset, |output| {
             umber_export::usd::usda_file_for_output(output, &sources, tile_names)
         });
-        let mesh_view = umber_export::usd::UsdMeshView {
-            positions: &mesh.positions,
-            normals: &mesh.normals,
-            uvs: &mesh.uvs,
-            indices: &mesh.indices,
-        };
         written.push(umber_export::usd::write_usda(
             out_dir, &set_name, &mesh_view, &textures,
         )?);
     }
     if preset.obj_mtl {
-        let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
         for &tile in &tiles {
             let textures = umber_export::usd::usd_textures(&preset, |output| {
                 umber_export::obj::obj_file_for_output(output, &sources, tile_names.then_some(tile))
             });
-            let mesh_view = umber_export::usd::UsdMeshView {
-                positions: &mesh.positions,
-                normals: &mesh.normals,
-                uvs: &mesh.uvs,
-                indices: &mesh.indices,
-            };
             let (obj, mtl) = umber_export::obj::write_obj_with_mtl(
                 out_dir,
                 &set_name,
@@ -1204,6 +1230,7 @@ fn export_mesh(
             written.extend([obj, mtl]);
         }
     }
+    guard.commit();
     Ok((written, tiles))
 }
 
@@ -1298,7 +1325,7 @@ mod tests {
         // export_cmd hands its whole arg list to parse_bake_flags, which
         // must not reject tile or the value-less document toggles.
         let args: Vec<String> = [
-            "mesh.obj", "out", "--tile", "1002", "--size", "64", "--usda", "--obj",
+            "mesh.obj", "out", "--tile", "1002", "--size", "64", "--usda", "--obj", "--psd",
         ]
         .iter()
         .map(|s| s.to_string())

@@ -360,6 +360,7 @@ export =
     .materialx = MaterialX (.mtlx)
     .usda = USD (.usda)
     .obj = OBJ + MTL
+    .psd = Layered PSD (.psd)
     .select-tile = Select at least one tile to export.
     .tile-badge = { $count ->
         [one] { $count } tile

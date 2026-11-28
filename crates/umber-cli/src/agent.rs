@@ -253,6 +253,9 @@ struct AgentExportStep {
     /// Also write OBJ + MTL (the `--obj` flag's session form).
     #[serde(default)]
     obj_mtl: bool,
+    /// Also write one layered PSD per map set (the `--psd` session form).
+    #[serde(default)]
+    psd: bool,
 }
 
 /// `project_open` — open a `.umber` project directory and hold it for
@@ -1330,6 +1333,7 @@ impl Session {
                     documents: crate::ExportDocFlags {
                         usda: s.usda,
                         obj_mtl: s.obj_mtl,
+                        psd: s.psd,
                     },
                     // Bake's v0 rule, unified: an open project's active
                     // set names the export; none open = the mesh's set.
