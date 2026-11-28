@@ -18,21 +18,21 @@ on:
       - 'appimage/**'
       - 'flatpak/**'
       - '.github/workflows/packaging.yml'
+      - '.github/workflows/appimage-build.yml'
       - 'Cargo.lock'
   pull_request:
     paths:
       - 'appimage/**'
       - 'flatpak/**'
       - '.github/workflows/packaging.yml'
+      - '.github/workflows/appimage-build.yml'
       - 'Cargo.lock'
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  # Toolchain policy: appimagetool is pinned for the explicit pack step;
-  # linuxdeploy and its type2 runtime are rolling (see appimage/README.md).
-  APPIMAGETOOL_URL: 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage'
-  LINUXDEPLOY_URL: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
+  # AppImage tool URLs and identity pins live only in appimage-build.yml;
+  # caller workflow env does not propagate into a reusable workflow's jobs.
 
 jobs:
   lint-packaging:

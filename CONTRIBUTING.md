@@ -86,6 +86,13 @@ Platform-specific CI legs:
   `bake_from_high_transfers_height_and_normal_from_the_high_mesh`.
 - Windows alone compiles and runs `cargo test -p stylus --features winink`.
 - Release CI additionally requires the packaging workflow before a tag.
+- **Action pinning policy (reviewed 2026-11-28):** the reusable
+  `appimage-build.yml` pins every action by full commit SHA because it
+  downloads and executes packaging tools. The cargo-dist-generated
+  `release.yml` and the lightweight CI/packaging orchestration retain
+  major-version action tags as an accepted maintenance policy; checkout
+  steps disable credential persistence where applicable. Reapply any local
+  release-workflow hardening after regenerating that file with cargo-dist.
 
 Then:
 
