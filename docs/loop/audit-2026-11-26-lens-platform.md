@@ -33,6 +33,6 @@ All prior rows are closed, with no regressions:
 - Parent closeout battery: **17/17** on the edited working tree, including exact trigger/env/policy assertions, Flatpak 5/5, scorecard 15/15, safe-push 18/18, real drift/scorecard/parity/layers, shell syntax, diff-check, and four workflow YAML parses.
 - Focused ad-hoc verifier after the workflow edit: **7/7 PASS**; temporary script deleted. This was ad-hoc verification, not a full-suite claim.
 - Independent re-review: **SHIP**, static-tree verification with all four workflow YAML parses.
-- Live push run `46136880608` exposed a reusable-workflow permission-elevation startup failure. `63d25bf0` removed the mandatory write scope and inherits caller scope; run `46137587286` then passed startup and created three jobs. A focused permission verifier passed **6/6**. The full packaging result remains asynchronous and is not claimed green.
+- Live push run `46136880608` exposed a reusable-workflow permission-elevation startup failure. `63d25bf0` removed the mandatory write scope and inherits caller scope. Run `46137587286` then completed **SUCCESS**: lint and AppImage green, payload-integrity smoke green, release attach correctly skipped, and development Flatpak skipped by design. A focused permission verifier passed **6/6**.
 - No tag was cut in this closeout. Tag-native packaging remains structurally verified until the next release gate.
 - Human/product/platform gates from the 2026-10-24 lens remain human gates, not code defects.

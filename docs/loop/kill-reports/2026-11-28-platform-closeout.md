@@ -29,13 +29,13 @@ A real local closeout battery passed **17/17** on the edited working tree:
 
 - Push run `46136880608` at `d2efaf91` ended in `startup_failure` with zero jobs. The reusable AppImage job required `contents: write`; the read-only development packaging caller could not elevate that scope.
 - Fix `63d25bf0`: the reusable workflow now inherits caller token scope. `release.yml` supplies `contents: write` for the release attach; development packaging can remain read-only with `attach-release=false`.
-- Push run `46137587286` at `63d25bf0` passed startup and created three jobs, proving the original startup failure is closed. Its full packaging result is asynchronous and is not claimed green here.
+- Push run `46137587286` at `63d25bf0` completed **SUCCESS**. Lint packaging and the reusable AppImage job passed, including tool identity, Vulkan-absence, and payload-integrity checks; release attach was correctly skipped, and development Flatpak was skipped by its dispatch-only design.
 - Focused ad-hoc permission verifier: **6/6 PASS** for caller token scope, release-only attach gating, caller inputs, YAML shapes, live job creation, and diff-check. Temporary script deleted; this is not a full-suite claim.
 
 ## Honest boundaries
 
 - Focused ad-hoc verifier after the workflow edit: **7/7 PASS**, covering trigger ownership, reusable env ownership, preserved PR/dispatch gates, policy text, Flatpak ownership/drift, and diff-check. Temporary script deleted; this is not a full-suite claim.
 - Independent re-review `deleg_40997d79`: **SHIP — zero remaining findings**.
-- Commit/push/current-tip packaging CI: not yet claimed.
-- No tag was cut and no AppImage/Flatpak build was dispatched in this closeout. Tag-native packaging remains structurally verified until the next release gate.
+- Live packaging CI `46137587286` at code commit `63d25bf0`: **SUCCESS**. Later commits in this closeout are documentation-only.
+- No tag was cut. Tag-native AppImage attach and Flatpak packaging remain structurally verified until the next release gate.
 - The linuxdeploy rolling-download policy remains the documented accepted risk; appimagetool remains SHA256- and exact-version-gated.
