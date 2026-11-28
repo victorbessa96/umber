@@ -26,4 +26,4 @@ Review source: `deleg_320688ac-4`, targeting `ec979743`. Reconciled to current c
 - Full final app suite: **939 passed, 0 failed**; every integration target green.
 - Strict app/gui/export/CLI clippy, rustfmt, scorecard (**3,360**), layers, parity, and `git diff --check`: clean.
 - Independent review: round 1 FIX-FIRST findings fixed, round 2 Reset Layout finding fixed, round 3 **SHIP**.
-- Targeted Windows CI is recorded separately; no unfiltered full-matrix claim is made here.
+- Targeted CI: `46121005389` full no-mesh matrix green; `46122297620` full narrow-layout matrix green; `46123272789` rail test green before redundant release cancellation; `46124496819` localized alias test green before redundant release cancellation; `46125685684` single-word guard green in lib and bin targets.

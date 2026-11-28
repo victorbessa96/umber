@@ -36,4 +36,8 @@
 - Full final app suite: **939 passed, 0 failed**; every integration target green.
 - `cargo clippy -p umber-app -p umber-gui -p umber-export -p umber-cli --all-targets -- -D warnings`: clean.
 - Rustfmt, `git diff --check`, scorecard (**3,360**), layers, and parity: clean.
-- Targeted Windows CI is recorded separately after dispatch; no unfiltered full-matrix claim is made here.
+- `46121005389`: full no-mesh matrix green on Windows and Ubuntu; both Open Mesh tests passed on Windows.
+- `46122297620`: full narrow-layout matrix green on Windows and Ubuntu; the custom saved-layout test passed on Windows.
+- `46123272789`: rail collision test passed on Windows; redundant release smoke was cancelled after the green test step.
+- `46124496819`: localized solid-dash alias test passed on Windows; redundant release smoke was cancelled after the green test step.
+- `46125685684`: single-word source guard passed on Windows in lib and bin targets; the run completed successfully.
