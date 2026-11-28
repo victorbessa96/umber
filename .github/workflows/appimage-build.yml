@@ -12,8 +12,10 @@ jobs:
   build:
     name: build AppImage (x86_64)
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    # Inherit token scope from the caller. release.yml grants contents:write
+    # for the attach step; packaging.yml can stay read-only when
+    # attach-release=false. Requiring write here made that read-only caller
+    # fail during workflow startup before any job was created.
     env:
       APPIMAGETOOL_GIT_VERSION: '8c8c91f'
       APPIMAGETOOL_BUILD: '296'
