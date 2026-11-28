@@ -984,7 +984,7 @@ fn preview_section(
 
 /// The picker's label for a locale tag: the language's own name for the
 /// built-in catalogs, the bare tag for discovered ones.
-fn locale_label(tag: &str) -> String {
+pub(crate) fn locale_label(tag: &str) -> String {
     match tag {
         "en-US" => "English (US)".to_owned(),
         "pt-BR" => "Português (Brasil)".to_owned(),

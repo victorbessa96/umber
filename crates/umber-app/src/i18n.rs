@@ -658,6 +658,42 @@ mod tests {
     }
 
     #[test]
+    fn no_single_word_english_ui_literals_bypass_the_catalogs() {
+        // The prose guard above catches multi-word strings line by line.
+        // This pass also flattens multiline calls and allows only technical
+        // tokens that are not user-facing prose.
+        let heads = [
+            ".label(\"",
+            ".button(\"",
+            ".hint_text(\"",
+            ".add_filter(\"",
+            ".selected_text(\"",
+        ];
+        let allowed = ["SVG", "PNG", "body", "in"];
+        let mut offenders = Vec::new();
+        for (name, text) in crate_sources() {
+            let flat = text.split_whitespace().collect::<Vec<_>>().join("");
+            for head in heads {
+                let mut from = 0;
+                while let Some(pos) = flat[from..].find(head) {
+                    let lit_start = from + pos + head.len();
+                    if let Some(end) = flat[lit_start..].find('"') {
+                        let lit = &flat[lit_start..lit_start + end];
+                        if lit.chars().any(|c| c.is_ascii_alphabetic()) && !allowed.contains(&lit) {
+                            offenders.push(format!("{name}: {lit}"));
+                        }
+                    }
+                    from = lit_start;
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "single-word English UI literals (route them through tr()): {offenders:?}"
+        );
+    }
+
+    #[test]
     fn every_blend_mode_has_a_key_in_both_catalogs() {
         // Audit F10: the combo labels come from `blend.<label_key()>`;
         // both locales must define every one, or the UI falls back to

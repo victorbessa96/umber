@@ -161,10 +161,14 @@ impl QuickSetup {
                     crate::i18n::with(|i| (i.locale().to_string(), i.locales()));
                 let mut picked = current.clone();
                 ComboBox::from_id_salt("setup-language")
-                    .selected_text(current)
+                    .selected_text(crate::display_panel::locale_label(&current))
                     .show_ui(ui, |ui| {
                         for loc in &locales {
-                            ui.selectable_value(&mut picked, loc.clone(), loc.clone());
+                            ui.selectable_value(
+                                &mut picked,
+                                loc.clone(),
+                                crate::display_panel::locale_label(loc),
+                            );
                         }
                     });
                 // The switch applies immediately so the window's own

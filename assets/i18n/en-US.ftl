@@ -963,6 +963,7 @@ vector =
     .stroke-join-bevel = Bevel
     .stroke-miter-limit = Miter limit
     .stroke-dash = Dash pattern
+    .stroke-dash-solid = Solid
     .stroke-dash-offset = Dash offset
     .export-svg = Export SVG
     .export-saved = Exported { $path }

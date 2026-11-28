@@ -451,6 +451,35 @@ pub fn apply_viewport_preset(dock: &mut DockState<Panel>, preset: ViewportPreset
     }
 }
 
+/// True only when the compacting policy should run for this width. The
+/// shell remembers the last width so a manual unfold at the same width is
+/// not immediately undone by the next frame.
+pub fn compact_width_changed(last: Option<f32>, width: f32) -> bool {
+    last.is_none_or(|previous| (previous - width).abs() > 1.0)
+}
+
+/// First use [`compact_for_width`] to tab the 2D view with the 3D. If the
+/// row still cannot hold its floor, fold the right column into its icon
+/// rail. Returns whether either action changed the layout. The shell calls
+/// this only when the width changes; sticky folds otherwise stay user-owned.
+pub fn compact_for_width_with_rails(
+    dock: &mut DockState<Panel>,
+    rails: &mut crate::dock_rail::Rails<Panel>,
+    width: f32,
+) -> bool {
+    let mut changed = compact_for_width(dock, width);
+    let need =
+        crate::dock_floor::subtree_floor(dock.main_surface(), NodeIndex::root(), &Panel::min_size)
+            .x;
+    if need > width
+        && rails.column(crate::dock_rail::Side::Right).is_none()
+        && rails.toggle(dock, crate::dock_rail::Side::Right, Panel::is_protected)
+    {
+        changed = true;
+    }
+    changed
+}
+
 /// The width-aware first layout (UI/UX audit A2-3). The Paint preset
 /// lays the 3D and 2D views side by side between the two rails; its
 /// horizontal floor (rail + 3D + 2D + rail, about 1120 logical px) does
@@ -458,9 +487,10 @@ pub fn apply_viewport_preset(dock: &mut DockState<Panel>, preset: ViewportPreset
 /// `dock_floor` scales every leaf down, so every panel clips. When the
 /// row cannot hold its floor in `width`, the 2D view moves into the 3D
 /// view's leaf as a tab (the 3D stays active), which brings the row to
-/// about 880 px. View > Both splits it back out on demand. Only the
-/// boot default and Reset Layout call this: a user's own layout is
-/// never rearranged. Returns whether it changed the dock.
+/// about 880 px. View > Both splits it back out on demand. The shell calls
+/// this for boot and restored layouts whenever the row cannot fit; a custom
+/// layout is rearranged only below its readability floor, never above it.
+/// Returns whether it changed the dock.
 pub fn compact_for_width(dock: &mut DockState<Panel>, width: f32) -> bool {
     let tree = dock.main_surface();
     if tree.is_empty() || !width.is_finite() {
@@ -832,6 +862,41 @@ mod tests {
         let vp = dock.find_tab(&Panel::Viewport).unwrap();
         let uv = dock.find_tab(&Panel::UvView).unwrap();
         assert_ne!(vp.node, uv.node, "Both splits them back out");
+    }
+
+    #[test]
+    fn custom_saved_layout_compacts_and_folds_at_narrow_widths() {
+        for width in [800.0, 960.0, 1100.0] {
+            let custom = preset(Workspace::Paint);
+            let ws = Workspaces::default();
+            let path = std::env::temp_dir().join(format!(
+                "umber-custom-narrow-{}-{width}.json",
+                std::process::id()
+            ));
+            save_layouts(&path, &ws.snapshot(&custom)).expect("save custom layout");
+            let (_, mut dock) = Workspaces::restore(load_layouts(&path).expect("restore custom"));
+            let mut rails = crate::dock_rail::Rails::default();
+            compact_for_width_with_rails(&mut dock, &mut rails, width);
+            let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 900.0));
+            crate::dock_floor::apply_floors(&mut dock, area, Panel::min_size);
+            for (panel, size) in crate::dock_floor::leaf_sizes(&dock, area) {
+                assert!(size.x >= 120.0, "{panel:?} below 120 at {width}: {size:?}");
+                assert!(size.y >= 120.0, "{panel:?} below 120 at {width}: {size:?}");
+            }
+            assert_eq!(
+                rails.column(crate::dock_rail::Side::Right).is_some(),
+                width < 900.0,
+                "right rail folds only when the compact row still cannot fit at {width}"
+            );
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn compact_width_changes_only_when_width_moves() {
+        assert!(compact_width_changed(None, 800.0));
+        assert!(!compact_width_changed(Some(800.0), 800.0));
+        assert!(compact_width_changed(Some(800.0), 960.0));
     }
 
     #[test]

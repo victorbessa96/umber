@@ -255,7 +255,7 @@ where
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut text)
                                 .desired_width(140.0)
-                                .hint_text("solid"),
+                                .hint_text(tr("vector.stroke-dash-solid")),
                         );
                         if response.changed() {
                             ui.memory_mut(|memory| memory.data.insert_temp(text_id, text.clone()));
@@ -484,7 +484,10 @@ fn parse_dash_pattern(
     offset: f32,
 ) -> Result<umber_core::vector::StrokeDash, umber_core::vector::VectorError> {
     let text = text.trim();
-    if text.is_empty() || text == "solid" {
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("solid")
+        || text.to_lowercase() == tr("vector.stroke-dash-solid").to_lowercase()
+    {
         return Ok(umber_core::vector::StrokeDash::solid());
     }
     let lengths = text
@@ -610,6 +613,19 @@ mod tests {
         assert!(parse_dash_pattern("solid", 0.0).expect("solid").is_solid());
         assert!(parse_dash_pattern("0 0", 0.0).is_err());
         assert!(parse_dash_pattern("not-a-number", 0.0).is_err());
+    }
+
+    #[test]
+    fn localized_solid_dash_alias_uses_the_active_catalog() {
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        crate::i18n::with(|i18n| {
+            i18n.set_locale("pt-BR");
+        });
+        let dash = parse_dash_pattern("linha contínua", 0.0).unwrap();
+        assert_eq!(dash, umber_core::vector::StrokeDash::solid());
+        crate::i18n::with(|i18n| {
+            i18n.set_locale("en-US");
+        });
     }
 
     #[test]

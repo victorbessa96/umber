@@ -982,6 +982,7 @@ vector =
     .stroke-join-bevel = Chanfro
     .stroke-miter-limit = Limite de miter
     .stroke-dash = Padrão de tracejado
+    .stroke-dash-solid = Linha contínua
     .stroke-dash-offset = Deslocamento do tracejado
     .export-svg = Exportar SVG
     .export-saved = Exportado { $path }

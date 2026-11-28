@@ -331,6 +331,13 @@ fn home_button(label: String, action: ShellAction, is_mac: bool) -> Button<'stat
     }
 }
 
+/// Shared no-mesh empty state: the explanation plus a real Open Mesh
+/// action. Returns whether the user clicked that action this frame.
+pub fn no_mesh_action(ui: &mut Ui, message: &str) -> bool {
+    ui.label(message);
+    ui.button(crate::i18n::tr("menu.open-mesh")).clicked()
+}
+
 /// Draws the home card into the viewport's `rect` and returns the click,
 /// if any. `files_hovering` lights the drop wash and switches the title
 /// to "release". `input` is the shell's state; `None` draws the card

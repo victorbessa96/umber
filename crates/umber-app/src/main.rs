@@ -393,9 +393,10 @@ impl Panel {
             Panel::Assets => "library",
             Panel::History => "history",
             Panel::TextureSets => "layout-grid",
-            Panel::Bakes => "sun",
+            // Distinct from Toggle Grid / Cycle View Mode (R3-1).
+            Panel::Bakes => "file",
             Panel::Export => "upload",
-            Panel::Graph => "grid-3x3",
+            Panel::Graph => "panel-left",
             Panel::Display => "eye",
             Panel::Viewport | Panel::UvView => "box",
         }
@@ -1648,6 +1649,10 @@ impl TabViewer for PanelViewer<'_> {
                     mesh_path: self.mesh_path,
                 };
                 self.bakes.show(ui, ctx);
+                if self.bakes.take_open_mesh_request() {
+                    self.home_actions
+                        .push(crate::empty_state::HomeCardAction::OpenMesh);
+                }
             }
             Panel::Export => {
                 let ctx = ExportContext {
@@ -1663,6 +1668,10 @@ impl TabViewer for PanelViewer<'_> {
                     baked_normal: self.bakes.baked_normal(),
                 };
                 self.export.show(ui, ctx);
+                if self.export.take_open_mesh_request() {
+                    self.home_actions
+                        .push(crate::empty_state::HomeCardAction::OpenMesh);
+                }
                 // The button's click runs here, with `&mut` paint: flush the
                 // pending composites first (a fill added this frame would
                 // otherwise export stale), then the same path export.run
@@ -2450,13 +2459,12 @@ pub struct UmberApp {
     #[cfg(debug_assertions)]
     theme_last_poll: f64,
     dock: DockState<Panel>,
-    /// The boot default or a Reset Layout waits for the first frame's
-    /// dock width to fit itself (UI/UX audit A2-3,
-    /// [`workspaces::compact_for_width`]).
-    compact_layout_pending: bool,
     /// Side columns folded into icon rails, and the open flyout (UI/UX
     /// U7, [`dock_rail`]). Saved unfolded: a folded panel is never lost.
     rails: dock_rail::Rails<Panel>,
+    /// Width at which narrow-layout compaction last ran; a same-width
+    /// manual unfold is not re-folded by the next frame.
+    last_compact_width: Option<f32>,
     /// Each dock leaf's active panel at the last scroll-into-view pass
     /// (g5-tab-overflow): a change scrolls that leaf's strip once.
     tab_active_seen: std::collections::HashMap<NodePath, Panel>,
@@ -2579,8 +2587,6 @@ impl UmberApp {
         // else the boot shape (`shell_menu::default_dock`, which Window ▸
         // Reset Layout rebuilds).
         let saved = workspaces::load_layouts(&layouts_path());
-        // A2-3: the boot default fits itself to the first frame's width.
-        let compact_layout_pending = saved.is_none();
         let (workspaces, dock) = saved
             .map(workspaces::Workspaces::restore)
             .unwrap_or_else(|| {
@@ -2641,8 +2647,8 @@ impl UmberApp {
                 ..AppState::default()
             },
             dock,
-            compact_layout_pending,
             rails: dock_rail::Rails::default(),
+            last_compact_width: None,
             tab_active_seen: std::collections::HashMap::new(),
             gpu,
             display_lut,
@@ -5670,7 +5676,7 @@ impl eframe::App for UmberApp {
                     self.focus.restore(&mut self.dock);
                     self.dock = self.workspaces.reset_active();
                     self.rails = dock_rail::Rails::default();
-                    self.compact_layout_pending = true;
+                    self.last_compact_width = None;
                     ui.close();
                 }
                 toolbar::menu_digit_pick(ui, &items, &mut actions);
@@ -6073,11 +6079,14 @@ impl eframe::App for UmberApp {
                 // R-LAYOUT-1: no leaf narrower than its panel's floor while
                 // the window can hold them (egui_dock lays splits out from
                 // fractions alone). A fitting layout is left untouched.
-                if std::mem::take(&mut self.compact_layout_pending) {
-                    workspaces::compact_for_width(
+                let compact_width = ui.available_rect_before_wrap().width();
+                if workspaces::compact_width_changed(self.last_compact_width, compact_width) {
+                    workspaces::compact_for_width_with_rails(
                         &mut self.dock,
-                        ui.available_rect_before_wrap().width(),
+                        &mut self.rails,
+                        compact_width,
                     );
+                    self.last_compact_width = Some(compact_width);
                 }
                 dock_floor::apply_floors(
                     &mut self.dock,
@@ -9499,5 +9508,44 @@ mod material_pick_tests {
         assert!(doc.redo(), "one redo restores both picked fills");
         let restored: Vec<u64> = doc.layers()[1..].iter().map(|layer| layer.id).collect();
         assert_eq!(restored, ids);
+    }
+}
+
+#[cfg(test)]
+mod rail_icon_tests {
+    use super::Panel;
+
+    /// R3-1: every fold-rail icon is distinct from every top-strip action.
+    #[test]
+    fn fold_rail_glyphs_do_not_collide_with_toolbar_actions() {
+        const TOP_STRIP_GLYPHS: [&str; 10] = [
+            "boxes",
+            "folder-open",
+            "save",
+            "undo-2",
+            "redo-2",
+            "box",
+            "grid-3x3",
+            "sun",
+            "pencil-line",
+            "contrast",
+        ];
+        let rail = [
+            Panel::LayerStack,
+            Panel::Properties,
+            Panel::Assets,
+            Panel::History,
+            Panel::TextureSets,
+            Panel::Bakes,
+            Panel::Export,
+            Panel::Graph,
+            Panel::Display,
+        ];
+        let mut all = TOP_STRIP_GLYPHS.to_vec();
+        all.extend(rail.map(|panel| panel.rail_icon()));
+        all.sort_unstable();
+        for pair in all.windows(2) {
+            assert_ne!(pair[0], pair[1], "rail/toolbar glyph collision");
+        }
     }
 }

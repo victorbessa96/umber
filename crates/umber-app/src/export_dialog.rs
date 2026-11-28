@@ -484,6 +484,8 @@ pub struct ExportDialog {
     /// request the host runs after `show` returns: flush, then the same
     /// `export_current` that `export.run` uses (one export path).
     run_requested: bool,
+    /// One-shot Open Mesh request from the shared no-mesh empty state.
+    open_mesh_requested: bool,
 }
 
 impl ExportDialog {
@@ -507,6 +509,7 @@ impl ExportDialog {
             toast: None,
             completed_exports: 0,
             run_requested: false,
+            open_mesh_requested: false,
         }
     }
 
@@ -683,7 +686,8 @@ impl ExportDialog {
         let mesh_loaded = ctx.mesh.is_some();
         let gpu_ready = ctx.gpu.is_some();
         if !mesh_loaded {
-            ui.label(tr("export.no-mesh"));
+            self.open_mesh_requested |=
+                crate::empty_state::no_mesh_action(ui, &tr("export.no-mesh"));
         } else if !gpu_ready {
             ui.label(tr("export.no-gpu"));
         }
@@ -801,6 +805,11 @@ impl ExportDialog {
 
         ui.separator();
         ui.label(self.status.clone());
+    }
+
+    /// Takes the shared no-mesh Open Mesh click exactly once.
+    pub fn take_open_mesh_request(&mut self) -> bool {
+        std::mem::take(&mut self.open_mesh_requested)
     }
 
     /// Takes the Export button's pending click (see `run_requested`).
@@ -1295,6 +1304,36 @@ mod tests {
             harness.state().status(),
             crate::i18n::tr("export.no-export-yet")
         );
+    }
+
+    #[test]
+    fn no_mesh_offers_open_mesh_once() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, d: &mut ExportDialog| {
+                d.show(
+                    ui,
+                    ExportContext {
+                        gpu: None,
+                        mesh: None,
+                        mesh_path: None,
+                        paint: None,
+                        doc: None,
+                        graph: None,
+                        baked_normal: None,
+                    },
+                );
+            },
+            dialog(),
+        );
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        harness.run();
+        use egui_kittest::kittest::Queryable;
+        harness
+            .get_by_label(&crate::i18n::tr("menu.open-mesh"))
+            .click();
+        harness.run();
+        assert!(harness.state_mut().take_open_mesh_request());
+        assert!(!harness.state_mut().take_open_mesh_request());
     }
 
     #[test]

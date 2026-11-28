@@ -94,12 +94,23 @@ pub fn floored_fraction(current: f32, total: f32, first_min: f32, second_min: f3
     }
     let need = first_min + second_min + SEPARATOR_ALLOWANCE;
     if need > total {
+        // Below 240 two leaves cannot both clear 120. Keep the valid
+        // existing fraction; the workspace's fold policy must reduce the
+        // leaf count instead of manufacturing a negative second leaf.
+        if total < 240.0 {
+            return current;
+        }
         let sum = first_min + second_min;
-        return if sum > 0.0 {
-            (first_min / sum).clamp(0.0, 1.0)
-        } else {
-            current
-        };
+        if sum <= 0.0 {
+            return current;
+        }
+        // Keep the floors' proportion where possible, but never shrink a
+        // leaf below the 120 pt readability floor. When two leaves cannot
+        // both fit even that floor, the workspace folds a column first.
+        let proportion = first_min / sum;
+        let lo = 120.0 / total;
+        let hi = 1.0 - 120.0 / total;
+        return proportion.clamp(lo, hi.max(lo));
     }
     let lo = (first_min + SEPARATOR_ALLOWANCE * 0.5) / total;
     let hi = 1.0 - (second_min + SEPARATOR_ALLOWANCE * 0.5) / total;
@@ -295,15 +306,28 @@ mod tests {
     }
 
     #[test]
-    fn too_small_shares_in_proportion_to_the_floors() {
-        // 400 px cannot hold 360 + 260: the split follows 360:260.
+    fn too_small_never_drops_either_leaf_below_120() {
+        // 240 px cannot hold 360 + 260, but it can hold 120 + 120.
         let mut dock = sliver();
-        let a = area(400.0, 900.0);
+        let a = area(240.0, 900.0);
         apply_floors(&mut dock, a, floor);
         let s = leaf_sizes(&dock, a);
         let big = size_of(&s, T::Big).x;
         let side = size_of(&s, T::Side).x;
-        assert!((big / side - 360.0 / 260.0).abs() < 0.01, "{big} {side}");
+        assert_eq!(big, 120.0, "big leaf must pin the exact floor");
+        assert_eq!(side, 120.0, "side leaf must pin the exact floor");
+    }
+
+    #[test]
+    fn tiny_windows_never_produce_invalid_fractions() {
+        for total in [60.0, 120.0, 200.0, 239.0] {
+            let fraction = floored_fraction(0.5, total, 360.0, 260.0);
+            assert!(
+                (0.0..=1.0).contains(&fraction),
+                "invalid split at {total}: {fraction}"
+            );
+            assert!(total * (1.0 - fraction) >= 0.0, "negative second leaf");
+        }
     }
 
     #[test]

@@ -1283,6 +1283,8 @@ pub struct BakesPanel {
     /// g0-notices' open tail: a failure toast queued for the app shell
     /// (drained after the dock into the app's notice stack).
     pub toast: Option<(umber_gui::NoticeLevel, String)>,
+    /// One-shot Open Mesh request from the shared no-mesh empty state.
+    open_mesh_requested: bool,
     resolution: u32,
     /// The checked maps (C2-29: eight selectable, so a set, not one bool
     /// per map).
@@ -1552,6 +1554,7 @@ impl BakesPanel {
             sync: BakeSync::default(),
             settings_focus: None,
             sync_note: None,
+            open_mesh_requested: false,
         }
     }
 
@@ -2533,6 +2536,11 @@ impl BakesPanel {
         Ok(())
     }
 
+    /// Takes the shared no-mesh Open Mesh click exactly once.
+    pub fn take_open_mesh_request(&mut self) -> bool {
+        std::mem::take(&mut self.open_mesh_requested)
+    }
+
     /// Drains a finished bake job into `status`/`last_records` (call once
     /// per frame). Returns whether a job is still in flight afterward —
     /// the caller keeps repainting while it is.
@@ -2598,7 +2606,8 @@ impl BakesPanel {
         let mesh_loaded = ctx.mesh.is_some();
         let gpu_ready = ctx.gpu.is_some();
         if !mesh_loaded {
-            ui.label(tr("bakes.no-mesh"));
+            self.open_mesh_requested |=
+                crate::empty_state::no_mesh_action(ui, &tr("bakes.no-mesh"));
         } else if !gpu_ready {
             ui.label(tr("bakes.no-gpu"));
         }
@@ -5027,6 +5036,30 @@ mod tests {
             .map(|px| px[0])
             .min()
             .expect("covered AO texels exist")
+    }
+
+    #[test]
+    fn no_mesh_offers_open_mesh_once() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, p: &mut BakesPanel| {
+                p.show(
+                    ui,
+                    BakesContext {
+                        gpu: None,
+                        mesh: None,
+                        mesh_path: None,
+                    },
+                );
+            },
+            panel(),
+        );
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        harness.run();
+        use egui_kittest::kittest::Queryable;
+        harness.get_by_label(&tr("menu.open-mesh")).click();
+        harness.run();
+        assert!(harness.state_mut().take_open_mesh_request());
+        assert!(!harness.state_mut().take_open_mesh_request());
     }
 
     #[test]
