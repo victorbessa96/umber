@@ -25,6 +25,13 @@ A real local closeout battery passed **17/17** on the edited working tree:
 - `git diff --check`: clean.
 - PyYAML parsed `ci.yml`, `release.yml`, `packaging.yml`, and `appimage-build.yml` with job maps present.
 
+## Live startup regression and repair
+
+- Push run `46136880608` at `d2efaf91` ended in `startup_failure` with zero jobs. The reusable AppImage job required `contents: write`; the read-only development packaging caller could not elevate that scope.
+- Fix `63d25bf0`: the reusable workflow now inherits caller token scope. `release.yml` supplies `contents: write` for the release attach; development packaging can remain read-only with `attach-release=false`.
+- Push run `46137587286` at `63d25bf0` passed startup and created three jobs, proving the original startup failure is closed. Its full packaging result is asynchronous and is not claimed green here.
+- Focused ad-hoc permission verifier: **6/6 PASS** for caller token scope, release-only attach gating, caller inputs, YAML shapes, live job creation, and diff-check. Temporary script deleted; this is not a full-suite claim.
+
 ## Honest boundaries
 
 - Focused ad-hoc verifier after the workflow edit: **7/7 PASS**, covering trigger ownership, reusable env ownership, preserved PR/dispatch gates, policy text, Flatpak ownership/drift, and diff-check. Temporary script deleted; this is not a full-suite claim.
