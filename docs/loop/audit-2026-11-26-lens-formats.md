@@ -28,3 +28,10 @@ Review source: `deleg_320688ac-2`, targeting `ec979743`. Reconciled against the 
 - `cargo test -p umber-app -p umber-cli -- --test-threads=1`: **931 app bin tests**, **123 CLI bin tests**, every integration target, **0 failed**.
 - Strict export/app/CLI clippy, rustfmt, scorecard (**3,352**), layers, parity, and `git diff --check`: clean.
 - Final independent review: `opencode/beam-free` **SHIP**, zero findings.
+
+## Targeted CI receipts
+
+- `46094314573`: expanded-path matrix green on Windows and Ubuntu, including release smoke.
+- `46099035759`: all four duplicate/alias tests green on Windows; redundant release leg cancelled after the green test step.
+- `46100127649`: 11 EXR tests green on Windows, including the F16 writer/header/driver route; redundant release leg cancelled after the green test step.
+- `46101325599`: all three PSD driver tests and the app toggle green on Windows; redundant release leg cancelled after the green test step.

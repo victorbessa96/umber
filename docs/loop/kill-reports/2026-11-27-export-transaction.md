@@ -163,6 +163,11 @@ Path helpers:
   WARNs were pre-existing identifiers, not introduced error fields.
 - Independent final review: `opencode/beam-free` **SHIP**, zero findings.
 
+## Targeted CI
+
+- `46094314573` at `4e3df3ec`: expanded-path matrix **green on Windows and Ubuntu**, including release smoke; three preflight tests passed on Windows.
+- `46099035759` at `4e3df3ec`: all four relevant duplicate tests passed on Windows, including lexical aliases and `ExportArtifactGuard`. The run was cancelled afterward during the redundant release-smoke leg; its test evidence is green, not a full-matrix claim.
+
 ## Deliberate non-goals
 
 - No changes to `presets.rs`, `exr.rs`, `psd.rs`, or shared status docs.

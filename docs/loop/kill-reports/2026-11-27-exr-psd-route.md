@@ -27,6 +27,11 @@
 - Rustfmt, `git diff --check`, scorecard (**3,352**), layers, and parity: clean.
 - Independent final review: `opencode/beam-free` **SHIP**, zero findings.
 
+## Targeted CI
+
+- `46100127649` at `4e3df3ec`: **11 EXR tests passed on Windows**, including `f16_roundtrips_half_samples_and_marks_the_header`, `f16_rejects_mismatched_buffer_size`, and `exr16f_output_reaches_the_half_float_writer`. The redundant release-smoke leg was cancelled after the green test step.
+- `46101325599` at `4e3df3ec`: all three PSD driver tests passed on Windows (`psd_toggle_writes_and_roundtrips_one_layered_document`, `psd_tiled_run_writes_one_layered_document_per_tile`, and the registry round-trip), plus `export_dialog::tests::psd_toggle_reaches_the_run_preset`. The redundant release-smoke leg was cancelled after the green test step.
+
 ## Non-goals
 
 No f32-source precision work beyond the existing u8-to-f32 conversion, no per-layer paint-layer PSD writer, no release/tag/upstream PR, and no change to PSD import semantics.
